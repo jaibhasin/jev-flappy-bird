@@ -95,6 +95,7 @@ function createAIState() {
     runId: null,
     pendingMove: null,
     actionQueue: [],
+    hasPlan: false,
     timeToNextAction: 0,
     runToken: ++aiRunToken,
   };
@@ -538,6 +539,7 @@ function advanceAIPhysics(delta) {
 
   while (remaining > 0 && gameState.phase === 'running') {
     if (gameState.ai.actionQueue.length === 0) {
+      if (!gameState.ai.hasPlan) return;
       if (!gameState.ai.requestInFlight) requestAIDecision();
       const result = advancePhysics(remaining);
       remaining -= result.elapsedSeconds;
@@ -595,6 +597,7 @@ async function requestAIDecision() {
     }
 
     gameState.ai.requestInFlight = false;
+    gameState.ai.hasPlan = true;
     gameState.ai.confidence = payload.confidence;
     const requestLatency = performance.now() - startedAt;
     gameState.ai.latency = Math.round(requestLatency);

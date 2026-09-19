@@ -60,15 +60,16 @@ test('the game initializes and the start button begins a run', async () => {
     querySelector: (selector) => elements.get(selector) ?? null,
   };
   globalThis.window = { addEventListener() {} };
-  globalThis.fetch = async (_url, options) => {
+  let resolveActionResponse;
+  const actionResponse = new Promise((resolve) => {
+    resolveActionResponse = resolve;
+  });
+  globalThis.fetch = async (url, options) => {
+    if (url === '/api/jev/logs') {
+      return { ok: true, json: async () => ({ logs: [] }) };
+    }
     requests.push(JSON.parse(options.body));
-    return {
-      ok: true,
-      json: async () => ({
-        actions: Array(12).fill('wait'),
-        confidence: 0.8,
-      }),
-    };
+    return actionResponse;
   };
   globalThis.requestAnimationFrame = (callback) => {
     nextFrame = callback;
@@ -94,7 +95,19 @@ test('the game initializes and the start button begins a run', async () => {
   assert.equal(requests[0].sequences.every((sequence) => sequence.actions.length === 12), true);
 
   const initialPhysicsHeight = elements.get('#bird-height').textContent;
-  nextFrame(performance.now() + 100);
+  const firstFrameTime = performance.now() + 100;
+  nextFrame(firstFrameTime);
+  assert.equal(elements.get('#bird-height').textContent, initialPhysicsHeight);
+
+  resolveActionResponse({
+    ok: true,
+    json: async () => ({
+      actions: Array(12).fill('wait'),
+      confidence: 0.8,
+    }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  nextFrame(firstFrameTime + 100);
 
   assert.notEqual(elements.get('#bird-height').textContent, initialPhysicsHeight);
 });
