@@ -203,19 +203,32 @@ function drawBird(y = gameState.bird.y, rotation = gameState.bird.rotation) {
   ctx.save();
   ctx.translate(BIRD_X, y);
   ctx.rotate(rotation);
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#173049';
+  ctx.lineWidth = 2;
+
   ctx.fillStyle = '#ffd36c';
   ctx.beginPath();
   ctx.arc(0, 0, BIRD_RADIUS, 0, Math.PI * 2);
   ctx.fill();
+  ctx.stroke();
+
   ctx.fillStyle = '#ef9a46';
   ctx.beginPath();
   ctx.ellipse(-5, 7, 11, 5, -0.35, 0, Math.PI * 2);
   ctx.fill();
+  ctx.stroke();
+
   ctx.fillStyle = '#f5a344';
   ctx.beginPath();
   ctx.moveTo(11, -2); ctx.lineTo(27, 2); ctx.lineTo(11, 7); ctx.closePath(); ctx.fill();
+  ctx.stroke();
+
   ctx.fillStyle = '#fff';
   ctx.beginPath(); ctx.arc(7, -7, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.stroke();
+
   ctx.fillStyle = '#17283b';
   ctx.beginPath(); ctx.arc(8, -7, 2.2, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
