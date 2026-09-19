@@ -27,7 +27,7 @@
         <div class="game-column">
           <div class="mode-switch" aria-label="Game mode">
             <button class="mode-button active" id="human-mode" data-mode="human" type="button">Human mode</button>
-            <button class="mode-button" id="ai-mode" data-mode="ai" type="button">Watch AI</button>
+            <button class="mode-button" id="physics-mode" data-mode="physics" type="button">With physics</button>
           </div>
 
           <div class="game-card">
@@ -57,7 +57,7 @@
             </div>
           </div>
 
-          <p class="control-hint" id="control-hint"><kbd>Space</kbd> or click to flap</p>
+          <p class="control-hint" id="control-hint"><kbd>Space</kbd> or <kbd>↑</kbd> or click to flap</p>
         </div>
 
         <aside class="inspector" aria-label="Run inspector">
@@ -83,6 +83,7 @@
             <div class="state-card"><span>Gap offset</span><strong id="gap-offset">-</strong></div>
             <div class="state-card ai-stat"><span>Jev confidence</span><strong id="ai-confidence">-</strong></div>
             <div class="state-card ai-stat"><span>Response time</span><strong id="ai-latency">-</strong></div>
+            <div class="state-card ai-stat"><span>Move history</span><strong id="history-count">0 / 100</strong></div>
           </div>
 
           <div class="inspector-note" id="inspector-note">
@@ -91,6 +92,7 @@
           </div>
 
           <button class="secondary-button" id="reset-button">Reset run <span>↻</span></button>
+          <button class="secondary-button clear-experience" id="clear-experience">Clear experience <span>⌫</span></button>
         </aside>
       </section>
 
@@ -98,6 +100,6 @@
         <span>Fixed pipe pattern for now</span>
       </footer>
     </main>
-    <script src="game.js"></script>
+    <script type="module" src="game.js"></script>
   </body>
 </html>

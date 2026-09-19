@@ -3,12 +3,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
-const PORT = Number(process.env.PORT || 4173);
 const TYPESAFE_URL = 'https://api.typesafe.ai/v1/systemone';
 const MODEL = 'jev-latest';
 const REQUEST_TIMEOUT_MS = 4000;
 
 loadLocalEnv();
+
+const PORT = Number(process.env.PORT || 4173);
 
 const MIME_TYPES = {
   '.css': 'text/css; charset=utf-8',
@@ -88,7 +89,10 @@ async function handleJevAction(request, response) {
         questions: {
           action: {
             type: 'choice',
-            instructions: 'Choose the immediate action that best keeps the bird inside the next pipe opening.',
+            instructions: {
+              question: 'Choose the immediate action that best keeps the bird inside the next pipe opening.',
+              guidance: 'Use current_state as the main situation. Use projected_states as a physics lookahead and move_history as past evidence. Choose only one action for the current step.',
+            },
             criteria: {
               flap: 'Apply one upward impulse now.',
               wait: 'Do not apply an impulse now.',
@@ -126,7 +130,7 @@ async function handleJevAction(request, response) {
 function serveStatic(pathname, response) {
   const requestedPath = pathname === '/' ? '/index.html' : pathname;
   const fileName = requestedPath.slice(1);
-  if (!['index.html', 'game.js', 'styles.css'].includes(fileName)) {
+  if (!['index.html', 'game.js', 'ai-history.js', 'styles.css'].includes(fileName)) {
     sendError(response, 404, 'Not found.');
     return;
   }

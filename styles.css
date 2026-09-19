@@ -82,6 +82,8 @@ kbd { display: inline-block; padding: 2px 6px; border: 1px solid rgba(255,255,25
 .state-card strong { overflow: hidden; color: var(--text); font: 500 13px 'DM Mono', monospace; text-overflow: ellipsis; white-space: nowrap; }
 .ai-stat { display: none; }
 .ai-mode .ai-stat { display: flex; }
+.clear-experience { display: none; margin-top: 8px; }
+.ai-mode .clear-experience { display: block; }
 .inspector-note { display: flex; gap: 10px; min-height: 66px; margin: 22px 0 19px; padding: 13px; border-left: 2px solid var(--blue); border-radius: 0 8px 8px 0; background: rgba(130, 184, 255, .06); }
 .note-icon { color: var(--blue); font-size: 19px; line-height: 1; }
 .inspector-note p { margin: 0; color: var(--soft); font-size: 11px; line-height: 1.55; }

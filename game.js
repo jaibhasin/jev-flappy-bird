@@ -1,3 +1,5 @@
+import { MoveHistory } from './ai-history.js';
+
 const canvas = document.querySelector('#game');
 const ctx = canvas.getContext('2d');
 
@@ -15,7 +17,10 @@ const BIRD_RADIUS = 16;
 const COLLISION_RADIUS = 12;
 const GRAVITY = 950;
 const FLAP_VELOCITY = -330;
-const AI_DECISION_INTERVAL_MS = 1000 / 7;
+const AI_STEP_SECONDS = 1 / 7;
+const AI_STEP_MS = AI_STEP_SECONDS * 1000;
+const AI_PROJECTION_TIMES = [0, 0.1, 0.2, 0.3, 0.4, 0.5];
+const physicsHistory = new MoveHistory(100);
 
 const dom = {
   score: document.querySelector('#score'),
@@ -27,7 +32,7 @@ const dom = {
   overlayCopy: document.querySelector('#overlay-copy'),
   startButton: document.querySelector('#start-button'),
   humanMode: document.querySelector('#human-mode'),
-  aiMode: document.querySelector('#ai-mode'),
+  physicsMode: document.querySelector('#physics-mode'),
   controlHint: document.querySelector('#control-hint'),
   inspectorTitle: document.querySelector('#inspector-title'),
   actionLabel: document.querySelector('#action-label'),
@@ -38,8 +43,10 @@ const dom = {
   gapOffset: document.querySelector('#gap-offset'),
   aiConfidence: document.querySelector('#ai-confidence'),
   aiLatency: document.querySelector('#ai-latency'),
+  historyCount: document.querySelector('#history-count'),
   inspectorNote: document.querySelector('#inspector-note p'),
   resetButton: document.querySelector('#reset-button'),
+  clearExperience: document.querySelector('#clear-experience'),
 };
 
 let gameState;
@@ -75,16 +82,20 @@ function createPipes() {
 function createAIState() {
   return {
     requestInFlight: false,
-    nextDecisionAt: 0,
+    nextRequestTimer: null,
     lastAction: 'wait',
     confidence: null,
     latency: null,
     error: null,
+    runId: null,
     runToken: ++aiRunToken,
   };
 }
 
 function resetGame(mode = gameState?.mode || 'human') {
+  if (gameState?.ai?.nextRequestTimer !== null) {
+    clearTimeout(gameState.ai.nextRequestTimer);
+  }
   gameState = {
     mode,
     phase: 'ready',
@@ -107,15 +118,15 @@ function startGame() {
   gameState.phase = 'running';
   dom.overlay.classList.add('hidden');
   dom.runStatus.textContent = 'Flying';
-  if (gameState.mode === 'ai') {
-    gameState.ai.nextDecisionAt = performance.now() + AI_DECISION_INTERVAL_MS;
+  if (gameState.mode === 'physics') {
+    gameState.ai.runId = physicsHistory.startRun();
     requestAIDecision();
   }
   updateUI();
 }
 
 function flap() {
-  if (gameState.mode === 'ai') return;
+  if (gameState.mode === 'physics') return;
   if (gameState.phase !== 'running') {
     startGame();
   }
@@ -131,20 +142,20 @@ function applyFlap() {
 }
 
 function showReadyOverlay() {
-  const isAI = gameState.mode === 'ai';
-  dom.overlayKicker.textContent = isAI ? 'Watch AI' : 'Human mode';
+  const isPhysics = gameState.mode === 'physics';
+  dom.overlayKicker.textContent = isPhysics ? 'With physics' : 'Human mode';
   dom.overlayTitle.textContent = 'FLAPPY BIRD';
-  dom.overlayCopy.textContent = isAI ? 'Jev will choose when to flap.' : 'Tap the game or press Space to flap.';
-  dom.startButton.innerHTML = isAI ? 'Start AI run <span>↗</span>' : 'Start run <span>↗</span>';
+  dom.overlayCopy.textContent = isPhysics ? 'Jev will choose when to flap using the game physics.' : 'Tap the game or press Space or Up Arrow to flap.';
+  dom.startButton.innerHTML = isPhysics ? 'Start AI run <span>↗</span>' : 'Start run <span>↗</span>';
 }
 
 function applyModeUI() {
-  const isAI = gameState.mode === 'ai';
-  document.body.classList.toggle('ai-mode', isAI);
-  dom.humanMode.classList.toggle('active', !isAI);
-  dom.aiMode.classList.toggle('active', isAI);
-  dom.inspectorTitle.textContent = isAI ? "Jev's controls" : 'Your controls';
-  dom.controlHint.innerHTML = isAI ? 'Jev is flying this run' : '<kbd>Space</kbd> or <kbd>↑</kbd> or click to flap';
+  const isPhysics = gameState.mode === 'physics';
+  document.body.classList.toggle('ai-mode', isPhysics);
+  dom.humanMode.classList.toggle('active', !isPhysics);
+  dom.physicsMode.classList.toggle('active', isPhysics);
+  dom.inspectorTitle.textContent = isPhysics ? "Jev's controls" : 'Your controls';
+  dom.controlHint.innerHTML = isPhysics ? 'Jev is flying this run' : '<kbd>Space</kbd> or <kbd>↑</kbd> or click to flap';
 }
 
 function setMode(mode) {
@@ -158,37 +169,61 @@ function getNextPipe() {
 
 function update(delta) {
   if (gameState.phase !== 'running') return;
-  gameState.flash = Math.max(0, gameState.flash - delta);
-  gameState.bird.velocity += GRAVITY * delta;
-  gameState.bird.y += gameState.bird.velocity * delta;
-  gameState.bird.rotation = Math.min(1.35, gameState.bird.rotation + delta * 1.9);
-
-  for (const pipe of gameState.pipes) {
-    pipe.x -= PIPE_SPEED * delta;
-    if (!pipe.scored && pipe.x + PIPE_WIDTH < BIRD_X - BIRD_RADIUS) {
-      pipe.scored = true;
-      gameState.score += 1;
-    }
+  if (gameState.mode === 'physics') {
+    updateUI();
+    return;
   }
-
-  const pipe = getNextPipe();
-  const birdHitsPipe = pipe && BIRD_X + COLLISION_RADIUS > pipe.x && BIRD_X - COLLISION_RADIUS < pipe.x + PIPE_WIDTH && (gameState.bird.y - COLLISION_RADIUS < pipe.gapTop || gameState.bird.y + COLLISION_RADIUS > pipe.gapBottom);
-  const hitsBounds = gameState.bird.y - COLLISION_RADIUS < 0 || gameState.bird.y + COLLISION_RADIUS > PLAY_BOTTOM;
-  if (birdHitsPipe || hitsBounds) endGame();
-  if (gameState.mode === 'ai' && gameState.phase === 'running' && performance.now() >= gameState.ai.nextDecisionAt) {
-    gameState.ai.nextDecisionAt += AI_DECISION_INTERVAL_MS;
-    if (!gameState.ai.requestInFlight) requestAIDecision();
-  }
+  advancePhysics(delta);
   updateUI();
 }
 
-function endGame() {
+function advancePhysics(delta) {
+  let elapsed = 0;
+  const maxSubstep = 1 / 120;
+
+  while (elapsed < delta && gameState.phase === 'running') {
+    const step = Math.min(maxSubstep, delta - elapsed);
+    gameState.flash = Math.max(0, gameState.flash - step);
+    gameState.bird.velocity += GRAVITY * step;
+    gameState.bird.y += gameState.bird.velocity * step;
+    gameState.bird.rotation = Math.min(1.35, gameState.bird.rotation + step * 1.9);
+
+    for (const pipe of gameState.pipes) {
+      pipe.x -= PIPE_SPEED * step;
+      if (!pipe.scored && pipe.x + PIPE_WIDTH < BIRD_X - BIRD_RADIUS) {
+        pipe.scored = true;
+        gameState.score += 1;
+      }
+    }
+
+    elapsed += step;
+    const collision = getCollisionReason();
+    if (collision) {
+      endGame(collision);
+      return { elapsedSeconds: elapsed, collision };
+    }
+  }
+
+  return { elapsedSeconds: elapsed, collision: null };
+}
+
+function getCollisionReason() {
+  const pipe = getNextPipe();
+  const birdHitsPipe = pipe && BIRD_X + COLLISION_RADIUS > pipe.x && BIRD_X - COLLISION_RADIUS < pipe.x + PIPE_WIDTH && (gameState.bird.y - COLLISION_RADIUS < pipe.gapTop || gameState.bird.y + COLLISION_RADIUS > pipe.gapBottom);
+  if (birdHitsPipe) return gameState.bird.y < pipe.gapTop ? 'upper_pipe' : 'lower_pipe';
+  if (gameState.bird.y - COLLISION_RADIUS < 0) return 'ceiling';
+  if (gameState.bird.y + COLLISION_RADIUS > PLAY_BOTTOM) return 'ground';
+  return null;
+}
+
+function endGame(reason = 'unknown') {
   gameState.phase = 'gameover';
+  gameState.crashReason = reason;
   dom.runStatus.textContent = 'Crashed';
-  dom.overlayKicker.textContent = gameState.mode === 'ai' ? 'Watch AI' : 'Human mode';
+  dom.overlayKicker.textContent = gameState.mode === 'physics' ? 'With physics' : 'Human mode';
   dom.overlayTitle.textContent = `Run ended at ${gameState.score}`;
-  dom.overlayCopy.textContent = gameState.mode === 'ai' ? 'Same seed, same pipes. Watch Jev try again.' : 'Same seed, same pipes. Try a different rhythm.';
-  dom.startButton.innerHTML = gameState.mode === 'ai' ? 'Try AI again <span>↗</span>' : 'Try again <span>↗</span>';
+  dom.overlayCopy.textContent = gameState.mode === 'physics' ? `Jev hit the ${reason.replace('_', ' ')}. Try again to use the saved history.` : 'Same seed, same pipes. Try a different rhythm.';
+  dom.startButton.innerHTML = gameState.mode === 'physics' ? 'Try AI again <span>↗</span>' : 'Try again <span>↗</span>';
   dom.overlay.classList.remove('hidden');
   updateUI();
 }
@@ -197,41 +232,102 @@ function pauseForAIError(message) {
   gameState.phase = 'aierror';
   gameState.ai.error = message;
   dom.runStatus.textContent = 'AI paused';
-  dom.overlayKicker.textContent = 'Watch AI';
+  dom.overlayKicker.textContent = 'With physics';
   dom.overlayTitle.textContent = 'AI CONNECTION PAUSED';
   dom.overlayCopy.textContent = message;
   dom.startButton.innerHTML = 'Try AI again <span>↗</span>';
   dom.overlay.classList.remove('hidden');
 }
 
-function getAIState() {
+function scheduleNextAIDecision(delay, runToken) {
+  gameState.ai.nextRequestTimer = setTimeout(() => {
+    if (gameState.ai.runToken !== runToken || gameState.phase !== 'running' || gameState.mode !== 'physics') return;
+    gameState.ai.nextRequestTimer = null;
+    requestAIDecision();
+  }, delay);
+}
+
+function getGameSnapshot() {
   const pipe = getNextPipe();
+  const pipeIndex = pipe ? gameState.pipes.indexOf(pipe) : -1;
   const gapCenter = pipe ? (pipe.gapTop + pipe.gapBottom) / 2 : gameState.bird.y;
   return {
-    bird: {
-      height: Math.round(gameState.bird.y),
-      vertical_velocity: Math.round(gameState.bird.velocity),
-      gap_offset: Math.round(gameState.bird.y - gapCenter),
-    },
-    next_pipe: pipe ? {
-      distance: Math.max(0, Math.round(pipe.x - BIRD_X)),
-      gap_top: Math.round(pipe.gapTop),
-      gap_bottom: Math.round(pipe.gapBottom),
-      gap_center: Math.round(gapCenter),
-      time_to_pipe: Number((Math.max(0, pipe.x - BIRD_X) / PIPE_SPEED).toFixed(2)),
-    } : null,
-    physics: {
-      gravity: GRAVITY,
-      flap_velocity: FLAP_VELOCITY,
-      positive_y_direction: 'down',
-    },
     score: gameState.score,
-    last_action: gameState.ai.lastAction,
+    bird_y: Math.round(gameState.bird.y),
+    bird_velocity: Math.round(gameState.bird.velocity),
+    pipe_id: pipeIndex,
+    pipe_distance: pipe ? Math.max(0, Math.round(pipe.x - BIRD_X)) : null,
+    gap_top: pipe ? Math.round(pipe.gapTop) : null,
+    gap_bottom: pipe ? Math.round(pipe.gapBottom) : null,
+    gap_offset: Math.round(gameState.bird.y - gapCenter),
   };
 }
 
+function getProjectedState(seconds) {
+  const current = getGameSnapshot();
+  const pipe = getNextPipe();
+  const projectedY = gameState.bird.y + gameState.bird.velocity * seconds + 0.5 * GRAVITY * seconds ** 2;
+  const projectedVelocity = gameState.bird.velocity + GRAVITY * seconds;
+  const projectedPipeX = pipe ? pipe.x - PIPE_SPEED * seconds : null;
+  const inPipeX = pipe && BIRD_X + COLLISION_RADIUS > projectedPipeX && BIRD_X - COLLISION_RADIUS < projectedPipeX + PIPE_WIDTH;
+  const hitsPipe = inPipeX && (projectedY - COLLISION_RADIUS < pipe.gapTop || projectedY + COLLISION_RADIUS > pipe.gapBottom);
+  const crash = hitsPipe ? (projectedY < pipe.gapTop ? 'upper_pipe' : 'lower_pipe') : projectedY - COLLISION_RADIUS < 0 ? 'ceiling' : projectedY + COLLISION_RADIUS > PLAY_BOTTOM ? 'ground' : null;
+
+  return {
+    after_ms: Math.round(seconds * 1000),
+    bird_y: Math.round(projectedY),
+    bird_velocity: Math.round(projectedVelocity),
+    pipe_id: current.pipe_id,
+    pipe_distance: projectedPipeX === null ? null : Math.max(0, Math.round(projectedPipeX - BIRD_X)),
+    gap_top: current.gap_top,
+    gap_bottom: current.gap_bottom,
+    gap_offset: pipe ? Math.round(projectedY - (pipe.gapTop + pipe.gapBottom) / 2) : 0,
+    predicted_crash: crash,
+  };
+}
+
+function getAIState() {
+  return {
+    current_state: getGameSnapshot(),
+    physics: {
+      gravity: GRAVITY,
+      flap_velocity: FLAP_VELOCITY,
+      pipe_speed: PIPE_SPEED,
+      step_ms: AI_STEP_MS,
+      positive_y_direction: 'down',
+    },
+    projected_states: AI_PROJECTION_TIMES.map(getProjectedState),
+    move_history: physicsHistory.getAll(),
+  };
+}
+
+function recordAIStep(action, before, after, stepResult, requestLatency) {
+  physicsHistory.add({
+    seed: SEED,
+    before,
+    action,
+    after,
+    elapsed_game_ms: Math.round(stepResult.elapsedSeconds * 1000),
+    request_latency_ms: requestLatency,
+    result: {
+      survived: !stepResult.collision,
+      pipes_passed: after.score - before.score,
+      crash_reason: stepResult.collision,
+    },
+  }, gameState.ai.runId);
+}
+
+function applyAIDecision(action, requestLatency) {
+  const before = getGameSnapshot();
+  if (action === 'flap') applyFlap();
+  gameState.ai.lastAction = action;
+  const stepResult = advancePhysics(AI_STEP_SECONDS);
+  const after = getGameSnapshot();
+  recordAIStep(action, before, after, stepResult, requestLatency);
+}
+
 async function requestAIDecision() {
-  if (gameState.mode !== 'ai' || gameState.phase !== 'running' || gameState.ai.requestInFlight) return;
+  if (gameState.mode !== 'physics' || gameState.phase !== 'running' || gameState.ai.requestInFlight) return;
 
   const runToken = gameState.ai.runToken;
   const startedAt = performance.now();
@@ -247,22 +343,24 @@ async function requestAIDecision() {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'Jev could not make a decision.');
-    if (gameState.ai.runToken !== runToken || gameState.phase !== 'running' || gameState.mode !== 'ai') return;
+    if (gameState.ai.runToken !== runToken || gameState.phase !== 'running' || gameState.mode !== 'physics') return;
+    if (!['flap', 'wait'].includes(payload.action)) throw new Error('Jev returned an invalid action.');
 
-    gameState.ai.lastAction = payload.action;
+    gameState.ai.requestInFlight = false;
     gameState.ai.confidence = payload.confidence;
-    gameState.ai.latency = Math.round(performance.now() - startedAt);
-    if (payload.action === 'flap') applyFlap();
+    const requestLatency = performance.now() - startedAt;
+    gameState.ai.latency = Math.round(requestLatency);
+    applyAIDecision(payload.action, gameState.ai.latency);
+    if (gameState.phase === 'running') {
+      scheduleNextAIDecision(Math.max(0, AI_STEP_MS - requestLatency), runToken);
+    }
   } catch (error) {
     if (gameState.ai.runToken === runToken && gameState.phase === 'running') {
+      gameState.ai.requestInFlight = false;
       pauseForAIError(error.message);
     }
-  } finally {
-    if (gameState.ai.runToken === runToken) {
-      gameState.ai.requestInFlight = false;
-      updateUI();
-    }
   }
+  updateUI();
 }
 
 function updateUI() {
@@ -276,17 +374,19 @@ function updateUI() {
   dom.pipeDistance.textContent = pipe ? `${Math.max(0, Math.round(pipe.x - BIRD_X))} px` : '-';
   dom.gapOffset.textContent = `${offset >= 0 ? '+' : ''}${Math.round(offset)} px`;
 
-  if (gameState.mode === 'ai') {
+  if (gameState.mode === 'physics') {
     dom.actionLabel.textContent = 'Last action';
     dom.nextAction.textContent = gameState.ai.requestInFlight ? 'Thinking' : gameState.ai.lastAction === 'flap' ? 'Flap' : 'Wait';
     dom.aiConfidence.textContent = gameState.ai.confidence === null ? '-' : `${Math.round(gameState.ai.confidence * 100)}%`;
     dom.aiLatency.textContent = gameState.ai.latency === null ? '-' : `${gameState.ai.latency} ms`;
-    dom.inspectorNote.textContent = gameState.ai.error || 'Jev is evaluating the game state up to seven times per second.';
+    dom.historyCount.textContent = `${physicsHistory.size} / 100`;
+    dom.inspectorNote.textContent = gameState.ai.error || 'Jev is choosing one action, then the game advances by 1/7 second.';
   } else {
     dom.actionLabel.textContent = 'Next action';
     dom.nextAction.textContent = gameState.phase === 'running' ? 'Your call' : 'Waiting';
     dom.aiConfidence.textContent = '-';
     dom.aiLatency.textContent = '-';
+    dom.historyCount.textContent = '0 / 100';
     dom.inspectorNote.textContent = gameState.phase === 'running' ? 'The pipe pattern is deterministic. Find a rhythm that works.' : 'Play a run to see the game state update here.';
   }
 }
@@ -408,8 +508,12 @@ function loop(now) {
 
 dom.startButton.addEventListener('click', startGame);
 dom.resetButton.addEventListener('click', () => resetGame());
+dom.clearExperience.addEventListener('click', () => {
+  physicsHistory.clear();
+  resetGame('physics');
+});
 dom.humanMode.addEventListener('click', () => setMode('human'));
-dom.aiMode.addEventListener('click', () => setMode('ai'));
+dom.physicsMode.addEventListener('click', () => setMode('physics'));
 canvas.addEventListener('pointerdown', flap);
 window.addEventListener('keydown', (event) => {
   if (event.code === 'Space' || event.code === 'ArrowUp') {
