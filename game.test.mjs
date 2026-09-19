@@ -65,7 +65,7 @@ test('the game initializes and the start button begins a run', async () => {
     return {
       ok: true,
       json: async () => ({
-        actions: Array(7).fill('wait'),
+        actions: Array(12).fill('wait'),
         confidence: 0.8,
       }),
     };
@@ -91,7 +91,7 @@ test('the game initializes and the start button begins a run', async () => {
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(requests[0].sequences.length > 1, true);
-  assert.equal(requests[0].sequences.every((sequence) => sequence.actions.length === 7), true);
+  assert.equal(requests[0].sequences.every((sequence) => sequence.actions.length === 12), true);
 
   const initialPhysicsHeight = elements.get('#bird-height').textContent;
   nextFrame(performance.now() + 100);

@@ -28,13 +28,13 @@ Run `npm run check` for syntax checks.
 Human mode accepts Space, Up Arrow, click, and tap.
 
 With physics mode lets Jev choose `flap` or `wait`.
-Jev selects a buffered seven-step action sequence so the game can keep moving at normal speed while the next sequence is prepared.
+Jev selects a buffered twelve-step action sequence so the game can keep moving at normal speed while the next sequence is prepared.
 
 ## Jev input
 
 The server sends Jev the projected planning state, physics values, future positions, candidate sequence outcomes, and the latest 100 moves.
 
-Jev returns one typed sequence containing seven `flap` or `wait` actions.
+Jev returns one typed sequence containing twelve `flap` or `wait` actions.
 
 The game applies one buffered action every `1/7` second through the normal game physics.
 

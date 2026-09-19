@@ -94,7 +94,7 @@ async function handleJevAction(request, response) {
     typeof sequence?.id === 'string'
     && typeof sequence.description === 'string'
     && Array.isArray(sequence.actions)
-    && sequence.actions.length === 7
+    && sequence.actions.length === 12
     && sequence.actions.every((action) => action === 'flap' || action === 'wait')
   )) : [];
   if (sequences.length === 0) {

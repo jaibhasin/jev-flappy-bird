@@ -19,7 +19,7 @@ const GRAVITY = 950;
 const FLAP_VELOCITY = -330;
 const AI_STEP_SECONDS = 1 / 7;
 const AI_STEP_MS = AI_STEP_SECONDS * 1000;
-const AI_PLAN_STEPS = 7;
+const AI_PLAN_STEPS = 12;
 const AI_PROJECTION_TIMES = [0, 0.1, 0.2, 0.3, 0.4, 0.5];
 const physicsHistory = new MoveHistory(100);
 const actionSequences = createActionSequences();
@@ -169,7 +169,7 @@ function setMode(mode) {
 }
 
 function getNextPipeFor(world) {
-  return world.pipes.find((pipe) => pipe.x + PIPE_WIDTH >= BIRD_X - BIRD_RADIUS) || world.pipes[world.pipes.length - 1];
+  return world.pipes.find((pipe) => pipe.x + PIPE_WIDTH >= BIRD_X - BIRD_RADIUS) || null;
 }
 
 function getNextPipe() {
@@ -207,12 +207,14 @@ function advanceWorld(world, delta) {
 
     elapsed += step;
     const collision = getCollisionReasonFor(world);
+    const complete = world.pipes.every((pipe) => pipe.x + PIPE_WIDTH < BIRD_X - BIRD_RADIUS);
     if (collision) {
       return { elapsedSeconds: elapsed, collision };
     }
+    if (complete) return { elapsedSeconds: elapsed, collision: null, complete: true };
   }
 
-  return { elapsedSeconds: elapsed, collision: null };
+  return { elapsedSeconds: elapsed, collision: null, complete: false };
 }
 
 function advancePhysics(delta) {
@@ -221,6 +223,7 @@ function advancePhysics(delta) {
     gameState.ai.pendingMove.elapsedSeconds += result.elapsedSeconds;
   }
   if (result.collision) endGame(result.collision);
+  if (result.complete) completeGame();
   return result;
 }
 
@@ -242,6 +245,18 @@ function endGame(reason = 'unknown') {
   dom.overlayTitle.textContent = `Run ended at ${gameState.score}`;
   dom.overlayCopy.textContent = gameState.mode === 'physics' ? `Jev hit the ${reason.replace('_', ' ')}. Try again to use the saved history.` : 'Same seed, same pipes. Try a different rhythm.';
   dom.startButton.innerHTML = gameState.mode === 'physics' ? 'Try AI again <span>↗</span>' : 'Try again <span>↗</span>';
+  dom.overlay.classList.remove('hidden');
+  updateUI();
+}
+
+function completeGame() {
+  finishPendingAIMove();
+  gameState.phase = 'gameover';
+  dom.runStatus.textContent = 'Complete';
+  dom.overlayKicker.textContent = gameState.mode === 'physics' ? 'With physics' : 'Human mode';
+  dom.overlayTitle.textContent = `Run complete at ${gameState.score}`;
+  dom.overlayCopy.textContent = 'You cleared every pipe in this seeded run.';
+  dom.startButton.innerHTML = gameState.mode === 'physics' ? 'Run it again <span>↗</span>' : 'Play again <span>↗</span>';
   dom.overlay.classList.remove('hidden');
   updateUI();
 }
@@ -390,18 +405,23 @@ function cloneWorld(world = gameState) {
 function simulateActions(world, actions, initialDelay = 0) {
   const simulated = cloneWorld(world);
   let collision = null;
+  let complete = false;
 
   if (initialDelay > 0) {
-    collision = advanceWorld(simulated, initialDelay).collision;
+    const result = advanceWorld(simulated, initialDelay);
+    collision = result.collision;
+    complete = result.complete;
   }
 
   for (const action of actions) {
-    if (collision) break;
+    if (collision || complete) break;
     if (action === 'flap') simulated.bird.velocity = FLAP_VELOCITY;
-    collision = advanceWorld(simulated, AI_STEP_SECONDS).collision;
+    const result = advanceWorld(simulated, AI_STEP_SECONDS);
+    collision = result.collision;
+    complete = result.complete;
   }
 
-  return { world: simulated, collision };
+  return { world: simulated, collision, complete };
 }
 
 function getPlanningWorld() {
@@ -435,7 +455,7 @@ function getSequenceOptions(planningWorld) {
     const result = simulateActions(planningWorld, actions);
     const snapshot = getGameSnapshot(result.world);
     const id = actions.map((action) => action === 'flap' ? 'f' : 'w').join('');
-    const outcome = result.collision ? `collision ${result.collision}` : 'survives';
+    const outcome = result.collision ? `collision ${result.collision}` : result.complete ? 'completes the run' : 'survives';
     return {
       id,
       actions,
@@ -517,7 +537,13 @@ function advanceAIPhysics(delta) {
   let remaining = delta;
 
   while (remaining > 0 && gameState.phase === 'running') {
-    if (gameState.ai.actionQueue.length === 0) return;
+    if (gameState.ai.actionQueue.length === 0) {
+      if (!gameState.ai.requestInFlight) requestAIDecision();
+      const result = advancePhysics(remaining);
+      remaining -= result.elapsedSeconds;
+      if (result.collision || result.complete) return;
+      continue;
+    }
 
     if (gameState.ai.timeToNextAction <= 0) {
       const action = gameState.ai.actionQueue.shift();
