@@ -70,6 +70,7 @@ function resetGame() {
     pipes: createPipes(),
     flash: 0,
   };
+  dom.runStatus.textContent = 'Ready';
   updateUI();
 }
 
@@ -227,7 +228,7 @@ function draw() {
   }
   drawGround();
   if (gameState.phase === 'ready') {
-    const bob = Math.sin(performance.now() / 360) * 8;
+    const bob = Math.sin(performance.now() / 360) * 12;
     drawBird(HEIGHT * 0.45 + bob, -0.08);
   } else {
     drawBird();
