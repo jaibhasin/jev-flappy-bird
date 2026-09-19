@@ -26,7 +26,8 @@
       <section class="game-layout">
         <div class="game-column">
           <div class="mode-switch" aria-label="Game mode">
-            <span class="mode-badge">Human mode</span>
+            <button class="mode-button active" id="human-mode" data-mode="human" type="button">Human mode</button>
+            <button class="mode-button" id="ai-mode" data-mode="ai" type="button">Watch AI</button>
           </div>
 
           <div class="game-card">
@@ -70,7 +71,7 @@
 
           <div class="inspector-main" id="inspector-main">
             <div class="big-stat">
-              <span class="stat-label">Next action</span>
+              <span class="stat-label" id="action-label">Next action</span>
               <strong id="next-action">Waiting</strong>
             </div>
           </div>
@@ -80,6 +81,8 @@
             <div class="state-card"><span>Vertical speed</span><strong id="bird-speed">-</strong></div>
             <div class="state-card"><span>Pipe distance</span><strong id="pipe-distance">-</strong></div>
             <div class="state-card"><span>Gap offset</span><strong id="gap-offset">-</strong></div>
+            <div class="state-card ai-stat"><span>Jev confidence</span><strong id="ai-confidence">-</strong></div>
+            <div class="state-card ai-stat"><span>Response time</span><strong id="ai-latency">-</strong></div>
           </div>
 
           <div class="inspector-note" id="inspector-note">

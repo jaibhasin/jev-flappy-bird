@@ -42,7 +42,9 @@ h1 { margin: 0; font-size: 21px; letter-spacing: -.04em; }
 .game-layout { display: grid; grid-template-columns: minmax(0, 1fr) 335px; gap: 28px; align-items: start; }
 .game-column { min-width: 0; }
 .mode-switch { display: flex; width: fit-content; margin: 0 auto 15px; padding: 4px; border: 1px solid var(--line); border-radius: 11px; background: rgba(11, 18, 31, .76); }
-.mode-badge { padding: 9px 17px; border-radius: 7px; color: var(--text); background: #263752; box-shadow: inset 0 1px rgba(255,255,255,.07); font-size: 12px; font-weight: 700; }
+.mode-button { padding: 9px 17px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; font-size: 12px; font-weight: 700; }
+.mode-button.active { color: var(--text); background: #263752; box-shadow: inset 0 1px rgba(255,255,255,.07); }
+.mode-button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 .game-card { overflow: hidden; border: 1px solid var(--line); border-radius: 17px; background: #101b2a; box-shadow: 0 24px 70px rgba(0,0,0,.25); }
 .canvas-wrap { position: relative; width: 100%; max-width: 540px; margin: 0 auto; aspect-ratio: 3 / 4; }
 canvas { display: block; width: 100%; height: 100%; }
@@ -78,6 +80,8 @@ kbd { display: inline-block; padding: 2px 6px; border: 1px solid rgba(255,255,25
 .state-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .state-card { display: flex; flex-direction: column; gap: 8px; padding: 13px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.025); }
 .state-card strong { overflow: hidden; color: var(--text); font: 500 13px 'DM Mono', monospace; text-overflow: ellipsis; white-space: nowrap; }
+.ai-stat { display: none; }
+.ai-mode .ai-stat { display: flex; }
 .inspector-note { display: flex; gap: 10px; min-height: 66px; margin: 22px 0 19px; padding: 13px; border-left: 2px solid var(--blue); border-radius: 0 8px 8px 0; background: rgba(130, 184, 255, .06); }
 .note-icon { color: var(--blue); font-size: 19px; line-height: 1; }
 .inspector-note p { margin: 0; color: var(--soft); font-size: 11px; line-height: 1.55; }
