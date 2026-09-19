@@ -28,14 +28,14 @@ Run `npm run check` for syntax checks.
 Human mode accepts Space, Up Arrow, click, and tap.
 
 With physics mode lets Jev choose `flap` or `wait`.
-The game pauses while waiting for the answer, then advances exactly `1/7` second.
+Jev selects a buffered seven-step action sequence so the game can keep moving at normal speed while the next sequence is prepared.
 
 ## Jev input
 
-The server sends Jev the current bird height, vertical velocity, next-pipe distance, gap boundaries, gap offset, physics values, projected states for the next 500 ms, and the latest 100 moves.
+The server sends Jev the projected planning state, physics values, future positions, candidate sequence outcomes, and the latest 100 moves.
 
-Jev returns one typed action: `flap` or `wait`.
+Jev returns one typed sequence containing seven `flap` or `wait` actions.
 
-The game asks Jev at most seven times per second and applies the returned action through the normal game physics.
+The game applies one buffered action every `1/7` second through the normal game physics.
 
 The API key stays server-side in `server.mjs`.
