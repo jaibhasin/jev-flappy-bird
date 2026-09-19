@@ -1,0 +1,9 @@
+{
+  "name": "flappy-bird-jev",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check game.js && node --check server.mjs"
+  }
+}
