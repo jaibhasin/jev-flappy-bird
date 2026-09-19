@@ -93,8 +93,9 @@ function createAIState() {
 }
 
 function resetGame(mode = gameState?.mode || 'human') {
-  if (gameState?.ai?.nextRequestTimer !== null) {
-    clearTimeout(gameState.ai.nextRequestTimer);
+  const nextRequestTimer = gameState?.ai?.nextRequestTimer;
+  if (nextRequestTimer !== null && nextRequestTimer !== undefined) {
+    clearTimeout(nextRequestTimer);
   }
   gameState = {
     mode,

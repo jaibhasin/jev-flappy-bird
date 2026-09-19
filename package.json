@@ -4,6 +4,6 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check game.js && node --check server.mjs"
+    "check": "node --check game.js && node --check server.mjs && node --test game.test.mjs"
   }
 }
