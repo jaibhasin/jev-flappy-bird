@@ -50,14 +50,17 @@ canvas { display: block; width: 100%; height: 100%; }
 .hud-label { display: block; color: rgba(255,255,255,.72); font: 500 9px 'DM Mono', monospace; letter-spacing: .14em; text-transform: uppercase; }
 .game-hud strong { display: block; margin-top: 2px; font-size: 34px; letter-spacing: -.07em; }
 .run-status { display: inline-block; padding: 7px 10px; border: 1px solid rgba(255,255,255,.2); border-radius: 99px; background: rgba(4, 10, 19, .28); color: rgba(255,255,255,.82); font: 500 10px 'DM Mono', monospace; }
-.start-overlay { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; background: linear-gradient(180deg, rgba(5,11,20,.1), rgba(5,11,20,.56)); transition: opacity .25s ease; }
+.start-overlay { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; background: linear-gradient(180deg, rgba(5,11,20,.03), rgba(5,11,20,.18)); pointer-events: none; transition: opacity .25s ease; }
 .start-overlay.hidden { opacity: 0; pointer-events: none; }
-.overlay-card { width: min(275px, 100%); padding: 25px 24px 23px; border: 1px solid rgba(255,255,255,.18); border-radius: 16px; background: rgba(12, 22, 37, .86); text-align: center; box-shadow: 0 16px 45px rgba(0,0,0,.22); backdrop-filter: blur(9px); }
+.overlay-card { display: flex; flex-direction: column; align-items: center; width: min(350px, 100%); padding: 28px 24px 23px; text-align: center; text-shadow: 0 3px 0 rgba(17, 40, 57, .45); }
 .overlay-kicker { color: var(--cyan); font: 500 10px 'DM Mono', monospace; letter-spacing: .13em; text-transform: uppercase; }
-.overlay-card h2 { margin: 9px 0 8px; font-size: 24px; letter-spacing: -.06em; }
-.overlay-card p { margin-bottom: 21px; color: var(--soft); font-size: 12px; line-height: 1.6; }
+.game-title { margin: 24px 0; color: #fff5c7; font-size: clamp(30px, 8vw, 42px); font-weight: 900; letter-spacing: -.08em; word-spacing: .14em; text-transform: uppercase; -webkit-text-stroke: 2px #173049; text-shadow: 3px 3px 0 #e69a4b, 5px 5px 0 rgba(23, 48, 73, .65); }
+.tap-guide { display: flex; flex-direction: column; align-items: center; gap: 4px; margin-bottom: 13px; }
+.hand-icon { color: #fff; font-size: 42px; line-height: 1; text-shadow: 2px 3px 0 #173049; transform: rotate(-8deg); }
+.tap-label { padding: 7px 17px; border: 2px solid #173049; border-radius: 5px; color: #fff; background: #df513d; box-shadow: 3px 3px 0 rgba(23, 48, 73, .55); font-size: 12px; font-weight: 900; letter-spacing: .1em; }
+.overlay-card p { margin-bottom: 15px; color: #ecf8f3; font-size: 11px; line-height: 1.6; }
 .primary-button, .secondary-button { border: 0; cursor: pointer; font-weight: 800; transition: transform .15s ease, background .15s ease; }
-.primary-button { width: 100%; padding: 12px 16px; border-radius: 9px; color: #0b1523; background: var(--cyan); font-size: 12px; box-shadow: 0 8px 22px rgba(104, 224, 208, .18); }
+.primary-button { width: min(210px, 100%); padding: 11px 16px; border: 2px solid #173049; border-radius: 6px; color: #173049; background: #f3d16e; font-size: 12px; box-shadow: 3px 3px 0 rgba(23, 48, 73, .55); pointer-events: auto; }
 .primary-button span, .secondary-button span { float: right; font-size: 16px; line-height: 12px; }
 .primary-button:hover, .secondary-button:hover { transform: translateY(-1px); }
 .control-hint { margin: 12px 0 0; color: var(--muted); text-align: center; font-size: 11px; }

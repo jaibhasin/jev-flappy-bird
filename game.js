@@ -198,8 +198,7 @@ function drawGround() {
   }
 }
 
-function drawBird() {
-  const { y, rotation } = gameState.bird;
+function drawBird(y = gameState.bird.y, rotation = gameState.bird.rotation) {
   ctx.save();
   ctx.translate(BIRD_X, y);
   ctx.rotate(rotation);
@@ -223,9 +222,16 @@ function drawBird() {
 
 function draw() {
   drawBackground();
-  for (const pipe of gameState.pipes) drawPipe(pipe);
+  if (gameState.phase !== 'ready') {
+    for (const pipe of gameState.pipes) drawPipe(pipe);
+  }
   drawGround();
-  drawBird();
+  if (gameState.phase === 'ready') {
+    const bob = Math.sin(performance.now() / 360) * 8;
+    drawBird(HEIGHT * 0.45 + bob, -0.08);
+  } else {
+    drawBird();
+  }
   if (gameState.flash > 0) {
     ctx.fillStyle = `rgba(255, 239, 180, ${gameState.flash * 0.35})`;
     ctx.fillRect(0, 0, WIDTH, HEIGHT);
@@ -244,14 +250,14 @@ dom.startButton.addEventListener('click', startGame);
 dom.resetButton.addEventListener('click', () => {
   resetGame();
   dom.overlayKicker.textContent = 'Human mode';
-  dom.overlayTitle.textContent = 'Ready to fly?';
-  dom.overlayCopy.textContent = 'Tap, click, or press Space to flap through the gaps.';
+  dom.overlayTitle.textContent = 'FLAPPY BIRD';
+  dom.overlayCopy.textContent = 'Tap the game or press Space to flap.';
   dom.startButton.innerHTML = 'Start run <span>↗</span>';
   dom.overlay.classList.remove('hidden');
 });
 canvas.addEventListener('pointerdown', flap);
 window.addEventListener('keydown', (event) => {
-  if (event.code === 'Space') {
+  if (event.code === 'Space' || event.code === 'ArrowUp') {
     event.preventDefault();
     flap();
   }
