@@ -88,6 +88,7 @@ function createAIState() {
     latency: null,
     error: null,
     runId: null,
+    pendingMove: null,
     runToken: ++aiRunToken,
   };
 }
@@ -170,10 +171,6 @@ function getNextPipe() {
 
 function update(delta) {
   if (gameState.phase !== 'running') return;
-  if (gameState.mode === 'physics') {
-    updateUI();
-    return;
-  }
   advancePhysics(delta);
   updateUI();
 }
@@ -218,6 +215,7 @@ function getCollisionReason() {
 }
 
 function endGame(reason = 'unknown') {
+  finishPendingAIMove(reason);
   gameState.phase = 'gameover';
   gameState.crashReason = reason;
   dom.runStatus.textContent = 'Crashed';
@@ -318,13 +316,34 @@ function recordAIStep(action, before, after, stepResult, requestLatency) {
   }, gameState.ai.runId);
 }
 
+function finishPendingAIMove(collision = null) {
+  const pendingMove = gameState.ai.pendingMove;
+  if (!pendingMove) return;
+
+  recordAIStep(
+    pendingMove.action,
+    pendingMove.before,
+    getGameSnapshot(),
+    {
+      elapsedSeconds: (performance.now() - pendingMove.startedAt) / 1000,
+      collision,
+    },
+    pendingMove.requestLatency,
+  );
+  gameState.ai.pendingMove = null;
+}
+
 function applyAIDecision(action, requestLatency) {
+  finishPendingAIMove();
   const before = getGameSnapshot();
   if (action === 'flap') applyFlap();
   gameState.ai.lastAction = action;
-  const stepResult = advancePhysics(AI_STEP_SECONDS);
-  const after = getGameSnapshot();
-  recordAIStep(action, before, after, stepResult, requestLatency);
+  gameState.ai.pendingMove = {
+    action,
+    before,
+    requestLatency,
+    startedAt: performance.now(),
+  };
 }
 
 async function requestAIDecision() {
@@ -381,7 +400,7 @@ function updateUI() {
     dom.aiConfidence.textContent = gameState.ai.confidence === null ? '-' : `${Math.round(gameState.ai.confidence * 100)}%`;
     dom.aiLatency.textContent = gameState.ai.latency === null ? '-' : `${gameState.ai.latency} ms`;
     dom.historyCount.textContent = `${physicsHistory.size} / 100`;
-    dom.inspectorNote.textContent = gameState.ai.error || 'Jev is choosing one action, then the game advances by 1/7 second.';
+    dom.inspectorNote.textContent = gameState.ai.error || 'The game keeps moving while Jev chooses the next action.';
   } else {
     dom.actionLabel.textContent = 'Next action';
     dom.nextAction.textContent = gameState.phase === 'running' ? 'Your call' : 'Waiting';

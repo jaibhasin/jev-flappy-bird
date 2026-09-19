@@ -20,6 +20,7 @@ function createElement() {
 }
 
 test('the game initializes and the start button begins a run', async () => {
+  let nextFrame;
   const selectors = [
     '#score', '#seed-value', '#run-status', '#start-overlay', '#overlay-kicker',
     '#overlay-title', '#overlay-copy', '#start-button', '#human-mode',
@@ -35,7 +36,22 @@ test('the game initializes and the start button begins a run', async () => {
   const canvas = createElement();
   canvas.width = 540;
   canvas.height = 720;
-  canvas.getContext = () => ({});
+  canvas.getContext = () => ({
+    arc() {},
+    beginPath() {},
+    closePath() {},
+    createLinearGradient: () => ({ addColorStop() {} }),
+    ellipse() {},
+    fill() {},
+    fillRect() {},
+    lineTo() {},
+    moveTo() {},
+    restore() {},
+    rotate() {},
+    save() {},
+    stroke() {},
+    translate() {},
+  });
   elements.set('#game', canvas);
 
   globalThis.document = {
@@ -43,7 +59,11 @@ test('the game initializes and the start button begins a run', async () => {
     querySelector: (selector) => elements.get(selector) ?? null,
   };
   globalThis.window = { addEventListener() {} };
-  globalThis.requestAnimationFrame = () => 1;
+  globalThis.fetch = () => new Promise(() => {});
+  globalThis.requestAnimationFrame = (callback) => {
+    nextFrame = callback;
+    return 1;
+  };
   globalThis.cancelAnimationFrame = () => {};
 
   await import('./game.js');
@@ -55,4 +75,11 @@ test('the game initializes and the start button begins a run', async () => {
 
   assert.equal(elements.get('#run-status').textContent, 'Flying');
   assert.equal(elements.get('#start-overlay').classList.contains('hidden'), true);
+
+  elements.get('#physics-mode').click();
+  elements.get('#start-button').click();
+  const initialPhysicsHeight = elements.get('#bird-height').textContent;
+  nextFrame(performance.now() + 100);
+
+  assert.notEqual(elements.get('#bird-height').textContent, initialPhysicsHeight);
 });
