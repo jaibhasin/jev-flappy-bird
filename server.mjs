@@ -1,11 +1,14 @@
 import { createServer } from 'node:http';
-import { existsSync, readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const TYPESAFE_URL = 'https://api.typesafe.ai/v1/systemone';
 const MODEL = 'jev-latest';
 const REQUEST_TIMEOUT_MS = 4000;
+const JEV_LOG_LIMIT = 50;
+const JEV_LOG_PATH = `${ROOT}jev-logs.jsonl`;
 
 loadLocalEnv();
 
@@ -44,6 +47,20 @@ function sendError(response, status, message) {
   sendJson(response, status, { error: message });
 }
 
+function readJevLogs() {
+  if (!existsSync(JEV_LOG_PATH)) return [];
+  return readFileSync(JEV_LOG_PATH, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .slice(-JEV_LOG_LIMIT);
+}
+
+function saveJevLog(entry) {
+  const logs = [...readJevLogs(), entry].slice(-JEV_LOG_LIMIT);
+  writeFileSync(JEV_LOG_PATH, `${logs.map((log) => JSON.stringify(log)).join('\n')}\n`);
+}
+
 async function readJson(request) {
   let body = '';
   for await (const chunk of request) {
@@ -73,6 +90,36 @@ async function handleJevAction(request, response) {
     return;
   }
 
+  const sequences = Array.isArray(input.sequences) ? input.sequences.filter((sequence) => (
+    typeof sequence?.id === 'string'
+    && typeof sequence.description === 'string'
+    && Array.isArray(sequence.actions)
+    && sequence.actions.length === 7
+    && sequence.actions.every((action) => action === 'flap' || action === 'wait')
+  )) : [];
+  if (sequences.length === 0) {
+    sendError(response, 400, 'At least one valid action sequence is required.');
+    return;
+  }
+
+  const sequenceCriteria = Object.fromEntries(sequences.map((sequence) => [sequence.id, sequence.description]));
+  const traceId = randomUUID();
+  const startedAt = Date.now();
+  const modelRequest = {
+    state: input.state,
+    model: MODEL,
+    questions: {
+      action_plan: {
+        type: 'choice',
+        instructions: {
+          question: 'Choose the seven-step action sequence most likely to keep the bird alive and pass the next pipe.',
+          guidance: 'Only collision-free sequences are offered when one exists. First prefer more pipes passed, then prefer an ending gap offset closest to zero. Each step lasts 1/7 second.',
+        },
+        criteria: sequenceCriteria,
+      },
+    },
+  };
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -83,23 +130,7 @@ async function handleJevAction(request, response) {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        state: input.state,
-        model: MODEL,
-        questions: {
-          action: {
-            type: 'choice',
-            instructions: {
-              question: 'Choose the immediate action that best keeps the bird inside the next pipe opening.',
-              guidance: 'Use current_state as the main situation. Use projected_states as a physics lookahead and move_history as past evidence. Choose only one action for the current step.',
-            },
-            criteria: {
-              flap: 'Apply one upward impulse now.',
-              wait: 'Do not apply an impulse now.',
-            },
-          },
-        },
-      }),
+      body: JSON.stringify(modelRequest),
       signal: controller.signal,
     });
 
@@ -108,20 +139,41 @@ async function handleJevAction(request, response) {
     }
 
     const payload = await upstream.json();
-    const answer = payload.answers?.action;
-    if (!answer || !['flap', 'wait'].includes(answer.choice)) {
-      throw new Error('TypeSafe returned an invalid action.');
+    const answer = payload.answers?.action_plan;
+    const selectedSequence = sequences.find((sequence) => sequence.id === answer?.choice);
+    if (!answer || !selectedSequence) {
+      throw new Error('TypeSafe returned an invalid action plan.');
     }
 
-    sendJson(response, 200, {
-      action: answer.choice,
+    const appResponse = {
+      actions: selectedSequence.actions,
       confidence: answer.confidence ?? null,
       probabilities: answer.probabilities ?? {},
-    });
+    };
+    const trace = {
+      id: traceId,
+      at: new Date(startedAt).toISOString(),
+      duration_ms: Date.now() - startedAt,
+      ok: true,
+      request: modelRequest,
+      response: payload,
+      result: appResponse,
+    };
+    saveJevLog(trace);
+    sendJson(response, 200, { ...appResponse, trace });
   } catch (error) {
     const message = error.name === 'AbortError' ? 'TypeSafe request timed out.' : 'Could not get a decision from TypeSafe.';
     console.error(message, error.message);
-    sendError(response, 502, message);
+    const trace = {
+      id: traceId,
+      at: new Date(startedAt).toISOString(),
+      duration_ms: Date.now() - startedAt,
+      ok: false,
+      request: modelRequest,
+      error: message,
+    };
+    saveJevLog(trace);
+    sendJson(response, 502, { error: message, trace });
   } finally {
     clearTimeout(timeout);
   }
@@ -157,6 +209,17 @@ const server = createServer(async (request, response) => {
 
   if (request.method === 'GET' && url.pathname === '/api/health') {
     sendJson(response, 200, { ok: true, typesafeConfigured: Boolean(process.env.TYPESAFE_API_KEY || process.env.JEV_API_KEY) });
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/jev/logs') {
+    sendJson(response, 200, { logs: readJevLogs() });
+    return;
+  }
+
+  if (request.method === 'DELETE' && url.pathname === '/api/jev/logs') {
+    writeFileSync(JEV_LOG_PATH, '');
+    sendJson(response, 200, { ok: true });
     return;
   }
 

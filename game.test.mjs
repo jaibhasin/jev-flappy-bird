@@ -21,13 +21,14 @@ function createElement() {
 
 test('the game initializes and the start button begins a run', async () => {
   let nextFrame;
+  const requests = [];
   const selectors = [
     '#score', '#seed-value', '#run-status', '#start-overlay', '#overlay-kicker',
     '#overlay-title', '#overlay-copy', '#start-button', '#human-mode',
     '#physics-mode', '#control-hint', '#inspector-title', '#action-label',
     '#next-action', '#bird-height', '#bird-speed', '#pipe-distance',
     '#gap-offset', '#ai-confidence', '#ai-latency', '#history-count',
-    '#reset-button', '#clear-experience',
+    '#reset-button', '#clear-experience', '#jev-log-count', '#jev-logs', '#clear-jev-logs',
   ];
   const elements = new Map(selectors.map((selector) => [selector, createElement()]));
   const inspectorNote = createElement();
@@ -59,7 +60,16 @@ test('the game initializes and the start button begins a run', async () => {
     querySelector: (selector) => elements.get(selector) ?? null,
   };
   globalThis.window = { addEventListener() {} };
-  globalThis.fetch = () => new Promise(() => {});
+  globalThis.fetch = async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    return {
+      ok: true,
+      json: async () => ({
+        actions: Array(7).fill('wait'),
+        confidence: 0.8,
+      }),
+    };
+  };
   globalThis.requestAnimationFrame = (callback) => {
     nextFrame = callback;
     return 1;
@@ -78,6 +88,11 @@ test('the game initializes and the start button begins a run', async () => {
 
   elements.get('#physics-mode').click();
   elements.get('#start-button').click();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(requests[0].sequences.length > 1, true);
+  assert.equal(requests[0].sequences.every((sequence) => sequence.actions.length === 7), true);
+
   const initialPhysicsHeight = elements.get('#bird-height').textContent;
   nextFrame(performance.now() + 100);
 

@@ -87,6 +87,24 @@ kbd { display: inline-block; padding: 2px 6px; border: 1px solid rgba(255,255,25
 .inspector-note { display: flex; gap: 10px; min-height: 66px; margin: 22px 0 19px; padding: 13px; border-left: 2px solid var(--blue); border-radius: 0 8px 8px 0; background: rgba(130, 184, 255, .06); }
 .note-icon { color: var(--blue); font-size: 19px; line-height: 1; }
 .inspector-note p { margin: 0; color: var(--soft); font-size: 11px; line-height: 1.55; }
+.jev-log-panel { margin: 22px 0 19px; padding-top: 18px; border-top: 1px solid var(--line); }
+.jev-log-header { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 10px; }
+.jev-log-header h3 { margin: 0; font-size: 14px; letter-spacing: -.03em; }
+.log-clear { padding: 3px 0; border: 0; color: var(--muted); background: transparent; cursor: pointer; font: 500 10px 'DM Mono', monospace; }
+.log-clear:hover { color: var(--text); }
+.jev-logs { display: grid; gap: 7px; max-height: 360px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.jev-log-empty { padding: 12px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); font-size: 11px; text-align: center; }
+.jev-log-entry { padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.025); }
+.jev-log-entry.is-error { border-color: rgba(255, 130, 114, .35); }
+.jev-log-summary { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.jev-log-summary strong { display: block; color: var(--text); font-size: 11px; font-weight: 700; }
+.jev-log-summary span, .jev-log-context, .jev-log-detail > div > span { color: var(--muted); font: 500 9px/1.4 'DM Mono', monospace; }
+.jev-log-latency { flex: 0 0 auto; color: var(--soft) !important; }
+.jev-log-context { margin: 5px 0 7px; }
+.jev-log-entry details { border-top: 1px solid rgba(167, 194, 226, .09); }
+.jev-log-entry summary { padding-top: 7px; color: var(--blue); cursor: pointer; font-size: 10px; }
+.jev-log-detail { display: grid; gap: 8px; margin-top: 8px; }
+.jev-log-detail pre { max-height: 180px; margin: 4px 0 0; padding: 8px; overflow: auto; border-radius: 6px; color: var(--soft); background: rgba(0,0,0,.22); font: 10px/1.45 'DM Mono', monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .secondary-button { width: 100%; padding: 11px 13px; border: 1px solid var(--line); border-radius: 8px; color: var(--soft); background: rgba(255,255,255,.04); text-align: left; font-size: 11px; }
 .secondary-button:hover { background: rgba(255,255,255,.08); }
 .footer-note { display: flex; justify-content: center; gap: 9px; margin-top: 25px; color: #65748b; font: 500 10px 'DM Mono', monospace; }

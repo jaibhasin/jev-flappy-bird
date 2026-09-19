@@ -19,8 +19,10 @@ const GRAVITY = 950;
 const FLAP_VELOCITY = -330;
 const AI_STEP_SECONDS = 1 / 7;
 const AI_STEP_MS = AI_STEP_SECONDS * 1000;
+const AI_PLAN_STEPS = 7;
 const AI_PROJECTION_TIMES = [0, 0.1, 0.2, 0.3, 0.4, 0.5];
 const physicsHistory = new MoveHistory(100);
+const actionSequences = createActionSequences();
 
 const dom = {
   score: document.querySelector('#score'),
@@ -45,6 +47,9 @@ const dom = {
   aiLatency: document.querySelector('#ai-latency'),
   historyCount: document.querySelector('#history-count'),
   inspectorNote: document.querySelector('#inspector-note p'),
+  jevLogCount: document.querySelector('#jev-log-count'),
+  jevLogs: document.querySelector('#jev-logs'),
+  clearJevLogs: document.querySelector('#clear-jev-logs'),
   resetButton: document.querySelector('#reset-button'),
   clearExperience: document.querySelector('#clear-experience'),
 };
@@ -53,6 +58,7 @@ let gameState;
 let lastFrame = performance.now();
 let animationFrame;
 let aiRunToken = 0;
+let jevLogs = [];
 
 function seededRandom(seed) {
   let value = seed >>> 0;
@@ -82,22 +88,19 @@ function createPipes() {
 function createAIState() {
   return {
     requestInFlight: false,
-    nextRequestTimer: null,
     lastAction: 'wait',
     confidence: null,
     latency: null,
     error: null,
     runId: null,
     pendingMove: null,
+    actionQueue: [],
+    timeToNextAction: 0,
     runToken: ++aiRunToken,
   };
 }
 
 function resetGame(mode = gameState?.mode || 'human') {
-  const nextRequestTimer = gameState?.ai?.nextRequestTimer;
-  if (nextRequestTimer !== null && nextRequestTimer !== undefined) {
-    clearTimeout(nextRequestTimer);
-  }
   gameState = {
     mode,
     phase: 'ready',
@@ -165,39 +168,46 @@ function setMode(mode) {
   resetGame(mode);
 }
 
+function getNextPipeFor(world) {
+  return world.pipes.find((pipe) => pipe.x + PIPE_WIDTH >= BIRD_X - BIRD_RADIUS) || world.pipes[world.pipes.length - 1];
+}
+
 function getNextPipe() {
-  return gameState.pipes.find((pipe) => pipe.x + PIPE_WIDTH >= BIRD_X - BIRD_RADIUS) || gameState.pipes[gameState.pipes.length - 1];
+  return getNextPipeFor(gameState);
 }
 
 function update(delta) {
   if (gameState.phase !== 'running') return;
-  advancePhysics(delta);
+  if (gameState.mode === 'physics') {
+    advanceAIPhysics(delta);
+  } else {
+    advancePhysics(delta);
+  }
   updateUI();
 }
 
-function advancePhysics(delta) {
+function advanceWorld(world, delta) {
   let elapsed = 0;
   const maxSubstep = 1 / 120;
 
-  while (elapsed < delta && gameState.phase === 'running') {
+  while (elapsed < delta) {
     const step = Math.min(maxSubstep, delta - elapsed);
-    gameState.flash = Math.max(0, gameState.flash - step);
-    gameState.bird.velocity += GRAVITY * step;
-    gameState.bird.y += gameState.bird.velocity * step;
-    gameState.bird.rotation = Math.min(1.35, gameState.bird.rotation + step * 1.9);
+    world.flash = Math.max(0, world.flash - step);
+    world.bird.velocity += GRAVITY * step;
+    world.bird.y += world.bird.velocity * step;
+    world.bird.rotation = Math.min(1.35, world.bird.rotation + step * 1.9);
 
-    for (const pipe of gameState.pipes) {
+    for (const pipe of world.pipes) {
       pipe.x -= PIPE_SPEED * step;
       if (!pipe.scored && pipe.x + PIPE_WIDTH < BIRD_X - BIRD_RADIUS) {
         pipe.scored = true;
-        gameState.score += 1;
+        world.score += 1;
       }
     }
 
     elapsed += step;
-    const collision = getCollisionReason();
+    const collision = getCollisionReasonFor(world);
     if (collision) {
-      endGame(collision);
       return { elapsedSeconds: elapsed, collision };
     }
   }
@@ -205,12 +215,21 @@ function advancePhysics(delta) {
   return { elapsedSeconds: elapsed, collision: null };
 }
 
-function getCollisionReason() {
-  const pipe = getNextPipe();
-  const birdHitsPipe = pipe && BIRD_X + COLLISION_RADIUS > pipe.x && BIRD_X - COLLISION_RADIUS < pipe.x + PIPE_WIDTH && (gameState.bird.y - COLLISION_RADIUS < pipe.gapTop || gameState.bird.y + COLLISION_RADIUS > pipe.gapBottom);
-  if (birdHitsPipe) return gameState.bird.y < pipe.gapTop ? 'upper_pipe' : 'lower_pipe';
-  if (gameState.bird.y - COLLISION_RADIUS < 0) return 'ceiling';
-  if (gameState.bird.y + COLLISION_RADIUS > PLAY_BOTTOM) return 'ground';
+function advancePhysics(delta) {
+  const result = advanceWorld(gameState, delta);
+  if (gameState.mode === 'physics' && gameState.ai.pendingMove) {
+    gameState.ai.pendingMove.elapsedSeconds += result.elapsedSeconds;
+  }
+  if (result.collision) endGame(result.collision);
+  return result;
+}
+
+function getCollisionReasonFor(world) {
+  const pipe = getNextPipeFor(world);
+  const birdHitsPipe = pipe && BIRD_X + COLLISION_RADIUS > pipe.x && BIRD_X - COLLISION_RADIUS < pipe.x + PIPE_WIDTH && (world.bird.y - COLLISION_RADIUS < pipe.gapTop || world.bird.y + COLLISION_RADIUS > pipe.gapBottom);
+  if (birdHitsPipe) return world.bird.y < pipe.gapTop ? 'upper_pipe' : 'lower_pipe';
+  if (world.bird.y - COLLISION_RADIUS < 0) return 'ceiling';
+  if (world.bird.y + COLLISION_RADIUS > PLAY_BOTTOM) return 'ground';
   return null;
 }
 
@@ -238,35 +257,109 @@ function pauseForAIError(message) {
   dom.overlay.classList.remove('hidden');
 }
 
-function scheduleNextAIDecision(delay, runToken) {
-  gameState.ai.nextRequestTimer = setTimeout(() => {
-    if (gameState.ai.runToken !== runToken || gameState.phase !== 'running' || gameState.mode !== 'physics') return;
-    gameState.ai.nextRequestTimer = null;
-    requestAIDecision();
-  }, delay);
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
 }
 
-function getGameSnapshot() {
-  const pipe = getNextPipe();
-  const pipeIndex = pipe ? gameState.pipes.indexOf(pipe) : -1;
-  const gapCenter = pipe ? (pipe.gapTop + pipe.gapBottom) / 2 : gameState.bird.y;
+function prettyJson(value) {
+  return escapeHtml(JSON.stringify(value, null, 2));
+}
+
+function formatTraceTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 'Unknown time' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function renderJevLogs() {
+  if (!dom.jevLogs || !dom.jevLogCount) return;
+  dom.jevLogCount.textContent = jevLogs.length;
+  if (jevLogs.length === 0) {
+    dom.jevLogs.innerHTML = '<li class="jev-log-empty">No Jev calls yet.</li>';
+    return;
+  }
+
+  dom.jevLogs.innerHTML = [...jevLogs].reverse().map((trace) => {
+    const result = trace.result || {};
+    const state = trace.request?.state?.current_state || {};
+    const actions = Array.isArray(result.actions) ? result.actions.map((action) => action === 'flap' ? 'F' : 'W').join(' ') : '';
+    const status = trace.ok ? 'Success' : 'Failed';
+    const summary = trace.ok ? `Jev chose ${actions || 'an action plan'}` : trace.error || 'Request failed';
+    const confidence = result.confidence === null || result.confidence === undefined ? '' : ` · ${Math.round(result.confidence * 100)}% confidence`;
+    return `<li class="jev-log-entry ${trace.ok ? '' : 'is-error'}">
+      <div class="jev-log-summary">
+        <div><strong>${escapeHtml(summary)}</strong><span>${escapeHtml(status)} · ${escapeHtml(formatTraceTime(trace.at))}</span></div>
+        <span class="jev-log-latency">${escapeHtml(trace.duration_ms ?? '-')} ms</span>
+      </div>
+      <p class="jev-log-context">Bird ${escapeHtml(state.bird_y ?? '-')} px · Pipe ${escapeHtml(state.pipe_distance ?? '-')} px away${escapeHtml(confidence)}</p>
+      <details>
+        <summary>See request and response</summary>
+        <div class="jev-log-detail">
+          <div><span>Sent to Jev</span><pre>${prettyJson(trace.request || {})}</pre></div>
+          <div><span>Jev response</span><pre>${prettyJson(trace.response || { error: trace.error })}</pre></div>
+        </div>
+      </details>
+    </li>`;
+  }).join('');
+}
+
+function addJevLog(trace) {
+  if (!trace) return;
+  jevLogs = [...jevLogs, trace].slice(-50);
+  renderJevLogs();
+}
+
+async function loadJevLogs() {
+  try {
+    const response = await fetch('/api/jev/logs');
+    const payload = await response.json();
+    if (response.ok && Array.isArray(payload.logs)) {
+      jevLogs = payload.logs;
+      renderJevLogs();
+    }
+  } catch {
+    // The game remains usable if the local log endpoint is unavailable.
+  }
+}
+
+function makeClientTrace(request, response, ok, error, duration) {
   return {
-    score: gameState.score,
-    bird_y: Math.round(gameState.bird.y),
-    bird_velocity: Math.round(gameState.bird.velocity),
+    id: `client-${Date.now()}`,
+    at: new Date().toISOString(),
+    duration_ms: Math.round(duration),
+    ok,
+    request,
+    response,
+    result: ok ? response : undefined,
+    error,
+  };
+}
+
+function getGameSnapshot(world = gameState) {
+  const pipe = getNextPipeFor(world);
+  const pipeIndex = pipe ? world.pipes.indexOf(pipe) : -1;
+  const gapCenter = pipe ? (pipe.gapTop + pipe.gapBottom) / 2 : world.bird.y;
+  return {
+    score: world.score,
+    bird_y: Math.round(world.bird.y),
+    bird_velocity: Math.round(world.bird.velocity),
     pipe_id: pipeIndex,
     pipe_distance: pipe ? Math.max(0, Math.round(pipe.x - BIRD_X)) : null,
     gap_top: pipe ? Math.round(pipe.gapTop) : null,
     gap_bottom: pipe ? Math.round(pipe.gapBottom) : null,
-    gap_offset: Math.round(gameState.bird.y - gapCenter),
+    gap_offset: Math.round(world.bird.y - gapCenter),
   };
 }
 
-function getProjectedState(seconds) {
-  const current = getGameSnapshot();
-  const pipe = getNextPipe();
-  const projectedY = gameState.bird.y + gameState.bird.velocity * seconds + 0.5 * GRAVITY * seconds ** 2;
-  const projectedVelocity = gameState.bird.velocity + GRAVITY * seconds;
+function getProjectedState(seconds, world = gameState) {
+  const current = getGameSnapshot(world);
+  const pipe = getNextPipeFor(world);
+  const projectedY = world.bird.y + world.bird.velocity * seconds + 0.5 * GRAVITY * seconds ** 2;
+  const projectedVelocity = world.bird.velocity + GRAVITY * seconds;
   const projectedPipeX = pipe ? pipe.x - PIPE_SPEED * seconds : null;
   const inPipeX = pipe && BIRD_X + COLLISION_RADIUS > projectedPipeX && BIRD_X - COLLISION_RADIUS < projectedPipeX + PIPE_WIDTH;
   const hitsPipe = inPipeX && (projectedY - COLLISION_RADIUS < pipe.gapTop || projectedY + COLLISION_RADIUS > pipe.gapBottom);
@@ -285,9 +378,78 @@ function getProjectedState(seconds) {
   };
 }
 
-function getAIState() {
+function cloneWorld(world = gameState) {
   return {
-    current_state: getGameSnapshot(),
+    score: world.score,
+    bird: { ...world.bird },
+    pipes: world.pipes.map((pipe) => ({ ...pipe })),
+    flash: world.flash,
+  };
+}
+
+function simulateActions(world, actions, initialDelay = 0) {
+  const simulated = cloneWorld(world);
+  let collision = null;
+
+  if (initialDelay > 0) {
+    collision = advanceWorld(simulated, initialDelay).collision;
+  }
+
+  for (const action of actions) {
+    if (collision) break;
+    if (action === 'flap') simulated.bird.velocity = FLAP_VELOCITY;
+    collision = advanceWorld(simulated, AI_STEP_SECONDS).collision;
+  }
+
+  return { world: simulated, collision };
+}
+
+function getPlanningWorld() {
+  const { actionQueue, timeToNextAction } = gameState.ai;
+  return simulateActions(gameState, actionQueue, actionQueue.length > 0 ? timeToNextAction : 0).world;
+}
+
+function createActionSequences() {
+  const sequences = [];
+
+  function build(actions) {
+    if (actions.length === AI_PLAN_STEPS) {
+      sequences.push(actions);
+      return;
+    }
+
+    build([...actions, 'wait']);
+    const flapCount = actions.filter((action) => action === 'flap').length;
+    if (actions.at(-1) !== 'flap' && flapCount < 3) {
+      build([...actions, 'flap']);
+    }
+  }
+
+  build([]);
+  return sequences;
+}
+
+function getSequenceOptions(planningWorld) {
+  const startingScore = planningWorld.score;
+  const evaluated = actionSequences.map((actions) => {
+    const result = simulateActions(planningWorld, actions);
+    const snapshot = getGameSnapshot(result.world);
+    const id = actions.map((action) => action === 'flap' ? 'f' : 'w').join('');
+    const outcome = result.collision ? `collision ${result.collision}` : 'survives';
+    return {
+      id,
+      actions,
+      collision: result.collision,
+      description: `${actions.join(', ')}. ${outcome}; passes ${snapshot.score - startingScore} pipes; ends at y ${snapshot.bird_y}, velocity ${snapshot.bird_velocity}, gap offset ${snapshot.gap_offset}.`,
+    };
+  });
+  const safe = evaluated.filter((sequence) => !sequence.collision);
+  return safe.length > 0 ? safe : evaluated;
+}
+
+function getAIState(world = gameState) {
+  return {
+    current_state: getGameSnapshot(world),
     physics: {
       gravity: GRAVITY,
       flap_velocity: FLAP_VELOCITY,
@@ -295,7 +457,7 @@ function getAIState() {
       step_ms: AI_STEP_MS,
       positive_y_direction: 'down',
     },
-    projected_states: AI_PROJECTION_TIMES.map(getProjectedState),
+    projected_states: AI_PROJECTION_TIMES.map((seconds) => getProjectedState(seconds, world)),
     move_history: physicsHistory.getAll(),
   };
 }
@@ -325,7 +487,7 @@ function finishPendingAIMove(collision = null) {
     pendingMove.before,
     getGameSnapshot(),
     {
-      elapsedSeconds: (performance.now() - pendingMove.startedAt) / 1000,
+      elapsedSeconds: pendingMove.elapsedSeconds,
       collision,
     },
     pendingMove.requestLatency,
@@ -341,9 +503,38 @@ function applyAIDecision(action, requestLatency) {
   gameState.ai.pendingMove = {
     action,
     before,
+    elapsedSeconds: 0,
     requestLatency,
-    startedAt: performance.now(),
   };
+}
+
+function getPlanRequestThreshold() {
+  const latency = gameState.ai.latency ?? 700;
+  return Math.min(AI_PLAN_STEPS - 1, Math.ceil(latency / AI_STEP_MS) + 1);
+}
+
+function advanceAIPhysics(delta) {
+  let remaining = delta;
+
+  while (remaining > 0 && gameState.phase === 'running') {
+    if (gameState.ai.actionQueue.length === 0) return;
+
+    if (gameState.ai.timeToNextAction <= 0) {
+      const action = gameState.ai.actionQueue.shift();
+      applyAIDecision(action, gameState.ai.latency);
+      gameState.ai.timeToNextAction = AI_STEP_SECONDS;
+
+      if (gameState.ai.actionQueue.length <= getPlanRequestThreshold() && !gameState.ai.requestInFlight) {
+        requestAIDecision();
+      }
+    }
+
+    const step = Math.min(remaining, gameState.ai.timeToNextAction);
+    const result = advancePhysics(step);
+    gameState.ai.timeToNextAction -= result.elapsedSeconds;
+    remaining -= result.elapsedSeconds;
+    if (result.collision) return;
+  }
 }
 
 async function requestAIDecision() {
@@ -351,30 +542,39 @@ async function requestAIDecision() {
 
   const runToken = gameState.ai.runToken;
   const startedAt = performance.now();
+  const planningWorld = getPlanningWorld();
+  const sequences = getSequenceOptions(planningWorld);
+  const requestBody = {
+    state: getAIState(planningWorld),
+    sequences: sequences.map(({ id, actions, description }) => ({ id, actions, description })),
+  };
   gameState.ai.requestInFlight = true;
   gameState.ai.error = null;
   updateUI();
 
+  let traceRecorded = false;
   try {
     const response = await fetch('/api/jev/action', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state: getAIState() }),
+      body: JSON.stringify(requestBody),
     });
     const payload = await response.json();
+    addJevLog(payload.trace || makeClientTrace(requestBody, payload, response.ok, payload.error, performance.now() - startedAt));
+    traceRecorded = true;
     if (!response.ok) throw new Error(payload.error || 'Jev could not make a decision.');
     if (gameState.ai.runToken !== runToken || gameState.phase !== 'running' || gameState.mode !== 'physics') return;
-    if (!['flap', 'wait'].includes(payload.action)) throw new Error('Jev returned an invalid action.');
+    if (!Array.isArray(payload.actions) || payload.actions.length !== AI_PLAN_STEPS || payload.actions.some((action) => !['flap', 'wait'].includes(action))) {
+      throw new Error('Jev returned an invalid action plan.');
+    }
 
     gameState.ai.requestInFlight = false;
     gameState.ai.confidence = payload.confidence;
     const requestLatency = performance.now() - startedAt;
     gameState.ai.latency = Math.round(requestLatency);
-    applyAIDecision(payload.action, gameState.ai.latency);
-    if (gameState.phase === 'running') {
-      scheduleNextAIDecision(Math.max(0, AI_STEP_MS - requestLatency), runToken);
-    }
+    gameState.ai.actionQueue.push(...payload.actions);
   } catch (error) {
+    if (!traceRecorded) addJevLog(makeClientTrace(requestBody, null, false, error.message, performance.now() - startedAt));
     if (gameState.ai.runToken === runToken && gameState.phase === 'running') {
       gameState.ai.requestInFlight = false;
       pauseForAIError(error.message);
@@ -396,11 +596,11 @@ function updateUI() {
 
   if (gameState.mode === 'physics') {
     dom.actionLabel.textContent = 'Last action';
-    dom.nextAction.textContent = gameState.ai.requestInFlight ? 'Thinking' : gameState.ai.lastAction === 'flap' ? 'Flap' : 'Wait';
+    dom.nextAction.textContent = gameState.ai.actionQueue.length === 0 && gameState.ai.requestInFlight ? 'Planning' : gameState.ai.lastAction === 'flap' ? 'Flap' : 'Wait';
     dom.aiConfidence.textContent = gameState.ai.confidence === null ? '-' : `${Math.round(gameState.ai.confidence * 100)}%`;
     dom.aiLatency.textContent = gameState.ai.latency === null ? '-' : `${gameState.ai.latency} ms`;
     dom.historyCount.textContent = `${physicsHistory.size} / 100`;
-    dom.inspectorNote.textContent = gameState.ai.error || 'The game keeps moving while Jev chooses the next action.';
+    dom.inspectorNote.textContent = gameState.ai.error || `Jev has ${gameState.ai.actionQueue.length} buffered actions ready.`;
   } else {
     dom.actionLabel.textContent = 'Next action';
     dom.nextAction.textContent = gameState.phase === 'running' ? 'Your call' : 'Waiting';
@@ -532,6 +732,15 @@ dom.clearExperience.addEventListener('click', () => {
   physicsHistory.clear();
   resetGame('physics');
 });
+dom.clearJevLogs.addEventListener('click', async () => {
+  try {
+    await fetch('/api/jev/logs', { method: 'DELETE' });
+  } catch {
+    // Clearing the visible session is still useful if the local endpoint is unavailable.
+  }
+  jevLogs = [];
+  renderJevLogs();
+});
 dom.humanMode.addEventListener('click', () => setMode('human'));
 dom.physicsMode.addEventListener('click', () => setMode('physics'));
 canvas.addEventListener('pointerdown', flap);
@@ -543,5 +752,6 @@ window.addEventListener('keydown', (event) => {
 });
 
 resetGame();
+loadJevLogs();
 cancelAnimationFrame(animationFrame);
 animationFrame = requestAnimationFrame(loop);

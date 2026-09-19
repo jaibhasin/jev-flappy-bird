@@ -91,6 +91,19 @@
             <p>Play a run to see the game state update here.</p>
           </div>
 
+          <section class="jev-log-panel" aria-label="Jev activity">
+            <div class="jev-log-header">
+              <div>
+                <p class="eyebrow">Jev activity</p>
+                <h3><span id="jev-log-count">0</span> calls</h3>
+              </div>
+              <button class="log-clear" id="clear-jev-logs" type="button">Clear</button>
+            </div>
+            <ol class="jev-logs" id="jev-logs">
+              <li class="jev-log-empty">No Jev calls yet.</li>
+            </ol>
+          </section>
+
           <button class="secondary-button" id="reset-button">Reset run <span>↻</span></button>
           <button class="secondary-button clear-experience" id="clear-experience">Clear experience <span>⌫</span></button>
         </aside>
