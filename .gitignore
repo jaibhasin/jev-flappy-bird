@@ -1,3 +1,5 @@
 .env
 .gstack/
+todo.txt
+AGENTS.md
 jev-logs.jsonl
