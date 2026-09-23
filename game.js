@@ -17,8 +17,10 @@ const BIRD_RADIUS = 16;
 const COLLISION_RADIUS = 12;
 const GRAVITY = 950;
 const FLAP_VELOCITY = -330;
-const AI_REQUEST_INTERVAL_MS = 20;
-const INITIAL_LATENCY_ESTIMATE_MS = 200;
+const AI_REQUEST_INTERVAL_MS = 50;
+const MAX_IN_FLIGHT_REQUESTS = 12;
+const INITIAL_LATENCY_ESTIMATE_MS = 280;
+const JEV_REQUEST_TIMEOUT_MS = 6000;
 const physicsHistory = new MoveHistory(100);
 
 const dom = {
@@ -45,6 +47,12 @@ let lastFrame = performance.now();
 let animationFrame;
 let aiRunToken = 0;
 let jevLogs = [];
+const jevClientId = crypto.randomUUID();
+const jevResponseWaiters = new Map();
+let jevEventSource;
+let jevStreamReady = false;
+let jevRequestId = 0;
+let jevInFlightCount = 0;
 
 function seededRandom(seed) {
   let value = seed >>> 0;
@@ -73,17 +81,17 @@ function createPipes() {
 
 function createAIState() {
   return {
-    requestInFlight: false,
     lastAction: 'wait',
     confidence: null,
     latency: null,
     error: null,
+    offline: false,
+    retryAt: 0,
     runId: null,
     pendingMove: null,
     pendingResponses: [],
     trajectoryVersion: 0,
     latencyEstimate: INITIAL_LATENCY_ESTIMATE_MS,
-    lastRequestAt: 0,
     runToken: ++aiRunToken,
   };
 }
@@ -283,7 +291,7 @@ function renderJevTrace(trace) {
   const modelRequest = trace.request || {};
   const question = modelRequest.questions?.action?.instructions?.question;
   const choices = Object.keys(modelRequest.questions?.action?.criteria || {});
-  const state = modelRequest.state?.current_state || {};
+  const state = modelRequest.state || {};
   const result = trace.result || {};
   const requestSummary = [
     state.bird_y === undefined ? '' : `bird ${state.bird_y}px`,
@@ -372,9 +380,9 @@ function cloneWorld(world = gameState) {
   };
 }
 
-function getAIState(world = gameState, latencyProjection) {
+function getAIState(latencyProjection) {
   return {
-    current_state: getGameSnapshot(world),
+    ...latencyProjection,
     physics: {
       gravity: GRAVITY,
       flap_velocity: FLAP_VELOCITY,
@@ -382,7 +390,6 @@ function getAIState(world = gameState, latencyProjection) {
       decision_interval_ms: AI_REQUEST_INTERVAL_MS,
       positive_y_direction: 'down',
     },
-    projected_states: [latencyProjection],
   };
 }
 
@@ -446,40 +453,106 @@ function advanceAIPhysics(delta) {
     }
     applyAIDecision(item.action, item.latency);
     if (gameState.phase !== 'running') return;
+    if (item.action === 'flap') requestAIDecision();
   }
   advancePhysics(delta);
 }
 
-async function requestAIDecision() {
-  if (gameState.mode !== 'physics' || gameState.phase !== 'running') return;
+function settleJevResponse(requestId, error, packet) {
+  const waiter = jevResponseWaiters.get(requestId);
+  if (!waiter) return;
+  clearTimeout(waiter.timeout);
+  jevResponseWaiters.delete(requestId);
+  if (error) waiter.reject(error);
+  else waiter.resolve(packet);
+}
 
-  const runToken = gameState.ai.runToken;
+function connectJevEventStream() {
+  if (typeof EventSource === 'undefined') return;
+  jevEventSource = new EventSource(`/api/jev/stream?client=${encodeURIComponent(jevClientId)}`);
+  jevEventSource.onopen = () => {
+    jevStreamReady = true;
+    if (gameState?.mode === 'physics' && gameState.phase === 'running') {
+      gameState.ai.error = null;
+      gameState.ai.offline = false;
+      gameState.ai.retryAt = 0;
+      requestAIDecision();
+    }
+    updateUI();
+  };
+  jevEventSource.onmessage = (event) => {
+    try {
+      const packet = JSON.parse(event.data);
+      settleJevResponse(packet.rid, null, packet);
+    } catch {
+      // Ignore malformed stream events and keep the connection available for later answers.
+    }
+  };
+  jevEventSource.onerror = () => {
+    jevStreamReady = false;
+    if (gameState?.mode === 'physics' && gameState.phase === 'running') {
+      gameState.ai.error = 'Jev answer stream reconnecting';
+      gameState.ai.offline = true;
+      gameState.ai.retryAt = performance.now() + 500;
+    }
+    updateUI();
+  };
+}
+
+function postJevDecision(requestBody) {
+  const requestId = ++jevRequestId;
+  const body = { ...requestBody, client: jevClientId, rid: requestId };
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      settleJevResponse(requestId, new Error('Jev did not answer within 6 seconds.'));
+    }, JEV_REQUEST_TIMEOUT_MS);
+    jevResponseWaiters.set(requestId, { resolve, reject, timeout });
+
+    fetch('/api/jev/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(async (response) => {
+      if (response.status === 202) return;
+      const payload = await response.json().catch(() => ({}));
+      settleJevResponse(requestId, new Error(payload.error || 'Jev request was rejected.'));
+    }).catch((error) => {
+      settleJevResponse(requestId, error);
+    });
+  });
+}
+
+async function requestAIDecision() {
+  if (gameState.mode !== 'physics' || gameState.phase !== 'running' || !jevStreamReady) return;
+  if (performance.now() < gameState.ai.retryAt) return;
+  const maxInFlight = gameState.ai.offline ? 1 : MAX_IN_FLIGHT_REQUESTS;
+  if (jevInFlightCount >= maxInFlight) return;
+
+  const aiState = gameState.ai;
+  const runToken = aiState.runToken;
   const trajectoryVersion = gameState.ai.trajectoryVersion;
   const startedAt = performance.now();
-  const latencyEstimate = gameState.ai.latencyEstimate;
+  const latencyEstimate = aiState.latencyEstimate;
   const planningWorld = cloneWorld(gameState);
   const latencyProjection = getProjectedState(latencyEstimate / 1000, planningWorld);
   advanceWorld(planningWorld, latencyEstimate / 1000);
-  const state = getAIState(planningWorld, latencyProjection);
+  const state = getAIState(latencyProjection);
   const requestBody = {
     state,
     trajectory_version: trajectoryVersion,
   };
-  gameState.ai.requestInFlight = true;
-  gameState.ai.error = null;
+  jevInFlightCount += 1;
   updateUI();
 
   let traceRecorded = false;
   try {
-    const response = await fetch('/api/jev/action', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody),
-    });
-    const payload = await response.json();
-    addJevLog(payload.trace || makeClientTrace(requestBody, payload, response.ok, payload.error, performance.now() - startedAt));
-    traceRecorded = true;
-    if (!response.ok) throw new Error(payload.error || 'Jev could not make a decision.');
+    const event = await postJevDecision(requestBody);
+    const payload = event.body || {};
+    if (payload.trace) {
+      addJevLog(payload.trace);
+      traceRecorded = true;
+    }
+    if (event.status !== 200) throw new Error(payload.error || 'Jev could not make a decision.');
     if (gameState.ai.runToken !== runToken || gameState.phase !== 'running' || gameState.mode !== 'physics') return;
     if (!['flap', 'wait'].includes(payload.action) || payload.trajectory_version !== trajectoryVersion) {
       throw new Error('Jev returned an invalid action.');
@@ -488,7 +561,10 @@ async function requestAIDecision() {
     gameState.ai.confidence = payload.confidence;
     const requestLatency = performance.now() - startedAt;
     gameState.ai.latency = Math.round(requestLatency);
-    gameState.ai.latencyEstimate = Math.round(gameState.ai.latencyEstimate * 0.8 + requestLatency * 0.2);
+    gameState.ai.latencyEstimate = Math.round(gameState.ai.latencyEstimate * 0.8 + Math.min(requestLatency, 1000) * 0.2);
+    gameState.ai.error = null;
+    gameState.ai.offline = false;
+    gameState.ai.retryAt = 0;
     if (trajectoryVersion === gameState.ai.trajectoryVersion) {
       const executeAt = startedAt + latencyEstimate;
       gameState.ai.pendingResponses.push({
@@ -500,18 +576,26 @@ async function requestAIDecision() {
     }
   } catch (error) {
     if (!traceRecorded) addJevLog(makeClientTrace(requestBody, null, false, error.message, performance.now() - startedAt));
-    if (gameState.ai.runToken === runToken && gameState.phase === 'running' && !gameState.ai.error) {
-      pauseForAIError(error.message);
+    if (gameState.ai.runToken === runToken && gameState.phase === 'running') {
+      gameState.ai.error = error.message;
+      gameState.ai.offline = true;
+      gameState.ai.retryAt = performance.now() + 500;
     }
+  } finally {
+    jevInFlightCount = Math.max(0, jevInFlightCount - 1);
+    updateUI();
   }
-  gameState.ai.requestInFlight = false;
-  updateUI();
 }
 
 function updateUI() {
   if (!gameState) return;
   dom.score.textContent = gameState.score;
-  dom.runStatus.textContent = gameState.phase === 'running' ? 'Playing' : gameState.phase === 'over' ? 'Game over' : gameState.phase === 'aierror' ? 'Paused' : 'Ready';
+  dom.runStatus.textContent = gameState.phase === 'running'
+    ? gameState.ai.offline && gameState.mode === 'physics' ? 'Jev offline' : 'Playing'
+    : gameState.phase === 'gameover' ? 'Game over' : gameState.phase === 'aierror' ? 'Paused' : 'Ready';
+  if (gameState.mode === 'physics' && gameState.ai.offline) {
+    dom.jevState.textContent = `${gameState.ai.error}. Retrying shortly.`;
+  }
 }
 
 function drawBackground() {
@@ -642,5 +726,6 @@ window.addEventListener('keydown', (event) => {
 
 resetGame();
 loadJevLogs();
+connectJevEventStream();
 cancelAnimationFrame(animationFrame);
 animationFrame = requestAnimationFrame(loop);

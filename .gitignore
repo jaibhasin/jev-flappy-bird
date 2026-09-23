@@ -1,4 +1,5 @@
 .env
+node_modules/
 .gstack/
 todo.txt
 AGENTS.md

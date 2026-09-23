@@ -2,8 +2,15 @@
   "name": "flappy-bird-jev",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "scripts": {
     "start": "node server.mjs",
     "check": "node --check game.js && node --check server.mjs && node --test game.test.mjs"
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0",
+    "undici": "^8.11.0"
   }
 }
