@@ -17,13 +17,9 @@ const WARM_FOR_MS = 10 * 60_000;
 const WARM_AFTER_IDLE_MS = WARM_EVERY_MS / 2;
 const JEV_LOG_LIMIT = 50;
 const JEV_LOG_PATH = `${ROOT}jev-logs.jsonl`;
-const ACTION_INSTRUCTIONS = {
-  question: 'At the projected moment, should the bird flap once or wait to pass the next pipe?',
-  guidance: 'Use the bird position and motion relative to the next gap.',
-};
-const ACTION_CRITERIA = {
-  flap: 'Flap when the bird is below the gap, or inside the gap in its lower half and not rising.',
-  wait: 'Wait when the bird is above the gap, inside its upper half, or rising inside the gap, even if it is falling fast above the gap.',
+const PLAN_INSTRUCTIONS = {
+  question: 'Choose the safest timed flap plan that clears the upcoming pipes.',
+  guidance: 'Compare the predicted bird path, pipe gaps, action times, and clearances for each candidate. Choose only a plan that keeps the bird alive through its full planning horizon.',
 };
 
 const PORT = Number(process.env.PORT || 4173);
@@ -183,6 +179,12 @@ async function handleJevAction(request, response) {
     sendError(response, 400, 'A valid trajectory version is required.');
     return;
   }
+  if (!Array.isArray(input.plans) || input.plans.length < 1 || input.plans.length > 32
+    || input.plans.some((plan) => !plan || typeof plan.id !== 'string' || !Array.isArray(plan.actions_ms)
+      || plan.actions_ms.length > 4 || plan.actions_ms.some((time) => !Number.isInteger(time) || time < 0 || time >= 1800))) {
+    sendError(response, 400, 'One to 32 valid candidate plans are required.');
+    return;
+  }
   if (!eventStreams.has(clientId)) {
     sendError(response, 409, 'The answer stream is not connected.');
     return;
@@ -215,10 +217,14 @@ async function answerJevDecision(input) {
     state: input.state,
     model: MODEL,
     questions: {
-      action: {
+      plan: {
         type: 'choice',
-        instructions: ACTION_INSTRUCTIONS,
-        criteria: ACTION_CRITERIA,
+        instructions: PLAN_INSTRUCTIONS,
+        criteria: Object.fromEntries(input.plans.map((plan) => [plan.id, {
+          flap_times_ms: plan.actions_ms,
+          predicted_clearance_px: plan.minimum_clearance,
+          planning_horizon_ms: plan.horizon_ms,
+        }])),
       },
     },
   };
@@ -227,16 +233,20 @@ async function answerJevDecision(input) {
     const { data, response, requestId } = await getTypeSafeClient()
       .systemOne({
         state: input.state,
-        questions: { action: choice(ACTION_INSTRUCTIONS, ACTION_CRITERIA) },
+        questions: { plan: choice(PLAN_INSTRUCTIONS, modelRequest.questions.plan.criteria) },
       })
       .withResponse();
-    const answer = data.answers?.action;
-    if (!answer || !['flap', 'wait'].includes(answer.choice)) {
-      throw new Error('TypeSafe returned an invalid action.');
+    const answer = data.answers?.plan;
+    const selectedPlan = input.plans.find((plan) => plan.id === answer?.choice);
+    if (!answer || !selectedPlan) {
+      throw new Error('TypeSafe returned an invalid plan.');
     }
 
     const result = {
-      action: answer.choice,
+      action: 'plan',
+      plan_id: selectedPlan.id,
+      actions_ms: selectedPlan.actions_ms,
+      horizon_ms: selectedPlan.horizon_ms,
       trajectory_version: input.trajectory_version,
       confidence: answer.confidence ?? null,
       probabilities: answer.probabilities ?? {},

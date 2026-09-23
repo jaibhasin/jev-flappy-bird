@@ -18,8 +18,10 @@ const COLLISION_RADIUS = 12;
 const GRAVITY = 950;
 const FLAP_VELOCITY = -330;
 const AI_REQUEST_INTERVAL_MS = 50;
-const MAX_IN_FLIGHT_REQUESTS = 12;
 const INITIAL_LATENCY_ESTIMATE_MS = 280;
+const PLAN_HORIZON_MS = 1800;
+const PLAN_STEP_MS = 200;
+const MAX_PLAN_OPTIONS = 32;
 const JEV_REQUEST_TIMEOUT_MS = 6000;
 const physicsHistory = new MoveHistory(100);
 
@@ -89,9 +91,12 @@ function createAIState() {
     retryAt: 0,
     runId: null,
     pendingMove: null,
-    pendingResponses: [],
     trajectoryVersion: 0,
     latencyEstimate: INITIAL_LATENCY_ESTIMATE_MS,
+    latencySamples: [],
+    gameTimeMs: 0,
+    planEndMs: 0,
+    plannedActions: [],
     runToken: ++aiRunToken,
   };
 }
@@ -122,8 +127,8 @@ function startGame() {
   dom.runStatus.textContent = 'Flying';
   if (gameState.mode === 'physics') {
     gameState.ai.runId = physicsHistory.startRun();
-    requestAIDecision();
     gameState.ai.requestTimer = setInterval(requestAIDecision, AI_REQUEST_INTERVAL_MS);
+    requestAIDecision();
   }
   updateUI();
 }
@@ -302,7 +307,9 @@ function renderJevTrace(trace) {
   if (question) dom.jevQuestion.textContent = question;
   dom.jevState.textContent = trace.error || requestSummary || 'Game state sent';
   if (choices.length) dom.jevChoices.textContent = `Choices: ${choices.join(' · ')}`;
-  dom.jevAction.textContent = result.action || (trace.ok ? '-' : 'Request failed');
+  dom.jevAction.textContent = result.plan_id
+    ? `${result.plan_id}: ${result.actions_ms?.join(', ') || 'wait'} ms`
+    : result.action || (trace.ok ? '-' : 'Request failed');
   dom.jevProbabilities.textContent = formatProbabilities(result.probabilities);
 }
 
@@ -393,6 +400,95 @@ function getAIState(latencyProjection) {
   };
 }
 
+function copyWorld(world) {
+  return {
+    score: world.score,
+    bird: { ...world.bird },
+    pipes: world.pipes.map((pipe) => ({ ...pipe })),
+    flash: world.flash || 0,
+  };
+}
+
+function simulateWorld(world, actionTimesMs, durationMs) {
+  const simulation = copyWorld(world);
+  const actions = [...actionTimesMs].sort((a, b) => a - b);
+  let nextAction = 0;
+  let elapsedMs = 0;
+  let minimumClearance = Number.POSITIVE_INFINITY;
+  const stepMs = 1000 / 120;
+
+  while (elapsedMs < durationMs) {
+    while (actions[nextAction] !== undefined && actions[nextAction] <= elapsedMs + 0.001) {
+      simulation.bird.velocity = FLAP_VELOCITY;
+      nextAction += 1;
+    }
+    const step = Math.min(stepMs, durationMs - elapsedMs) / 1000;
+    const result = advanceWorld(simulation, step);
+    if (result.collision) return { safe: false, minimumClearance };
+    elapsedMs += step * 1000;
+
+    const pipe = getNextPipeFor(simulation);
+    if (pipe && BIRD_X + COLLISION_RADIUS > pipe.x && BIRD_X - COLLISION_RADIUS < pipe.x + PIPE_WIDTH) {
+      minimumClearance = Math.min(minimumClearance, simulation.bird.y - COLLISION_RADIUS - pipe.gapTop, pipe.gapBottom - simulation.bird.y - COLLISION_RADIUS);
+    }
+  }
+  return { safe: true, minimumClearance: Number.isFinite(minimumClearance) ? Math.round(minimumClearance) : 999 };
+}
+
+function projectCommittedPlan(targetGameTimeMs) {
+  const world = copyWorld(gameState);
+  let cursorMs = gameState.ai.gameTimeMs;
+  const pending = [...gameState.ai.plannedActions].sort((a, b) => a.atMs - b.atMs);
+  for (const action of pending) {
+    if (action.atMs > targetGameTimeMs) break;
+    const result = advanceWorld(world, Math.max(0, action.atMs - cursorMs) / 1000);
+    if (result.collision || result.complete) return null;
+    cursorMs = action.atMs;
+    world.bird.velocity = FLAP_VELOCITY;
+  }
+  const result = advanceWorld(world, Math.max(0, targetGameTimeMs - cursorMs) / 1000);
+  if (result.collision || result.complete) return null;
+  return world;
+}
+
+function buildCandidatePlans(world, latencyBudgetMs) {
+  const slots = Array.from({ length: PLAN_HORIZON_MS / PLAN_STEP_MS }, (_, index) => index * PLAN_STEP_MS);
+  const schedules = [[]];
+  function addCombinations(start, remaining, selected) {
+    if (selected.length) schedules.push([...selected]);
+    if (!remaining) return;
+    for (let index = start; index < slots.length; index += 1) {
+      selected.push(slots[index]);
+      addCombinations(index + 1, remaining - 1, selected);
+      selected.pop();
+    }
+  }
+  addCombinations(0, 4, []);
+
+  const candidates = schedules.map((actionsMs) => {
+    const result = simulateWorld(world, actionsMs, PLAN_HORIZON_MS + latencyBudgetMs);
+    return result.safe ? { actions_ms: actionsMs, minimum_clearance: result.minimumClearance, horizon_ms: PLAN_HORIZON_MS + latencyBudgetMs } : null;
+  }).filter(Boolean);
+  candidates.sort((a, b) => b.minimum_clearance - a.minimum_clearance);
+
+  const selected = [];
+  const seen = new Set();
+  for (let index = 0; index < candidates.length && selected.length < MAX_PLAN_OPTIONS; index += 1) {
+    const candidate = candidates[Math.floor(index * candidates.length / MAX_PLAN_OPTIONS)];
+    const key = candidate.actions_ms.join(',');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    selected.push({ id: `plan_${selected.length + 1}`, ...candidate });
+  }
+  return selected;
+}
+
+function getLatencyBudget() {
+  const samples = [...gameState.ai.latencySamples].sort((a, b) => a - b);
+  const p90 = samples.length ? samples[Math.min(samples.length - 1, Math.ceil(samples.length * 0.9) - 1)] : INITIAL_LATENCY_ESTIMATE_MS;
+  return Math.min(1800, Math.max(600, p90 + 150, gameState.ai.latencyEstimate * 1.5));
+}
+
 function recordAIStep(action, before, after, stepResult, requestLatency) {
   physicsHistory.add({
     seed: SEED,
@@ -440,22 +536,23 @@ function applyAIDecision(action, requestLatency) {
 }
 
 function advanceAIPhysics(delta) {
-  const now = performance.now();
-  const ready = gameState.ai.pendingResponses
-    .filter((item) => item.trajectoryVersion === gameState.ai.trajectoryVersion && item.executeAt <= now)
-    .sort((a, b) => a.executeAt - b.executeAt);
-  gameState.ai.pendingResponses = gameState.ai.pendingResponses.filter((item) => !ready.includes(item));
-  for (const item of ready) {
-    if (item.trajectoryVersion !== gameState.ai.trajectoryVersion) continue;
-    if (item.action === 'flap') gameState.ai.trajectoryVersion += 1;
-    if (item.action === 'flap') {
-      gameState.ai.pendingResponses = gameState.ai.pendingResponses.filter((pending) => pending.trajectoryVersion === gameState.ai.trajectoryVersion);
+  let remaining = delta;
+  const actions = gameState.ai.plannedActions.sort((a, b) => a.atMs - b.atMs);
+  while (actions.length && actions[0].atMs <= gameState.ai.gameTimeMs + remaining) {
+    const action = actions.shift();
+    const untilAction = Math.max(0, (action.atMs - gameState.ai.gameTimeMs) / 1000);
+    if (untilAction > 0) {
+      const result = advancePhysics(untilAction);
+      gameState.ai.gameTimeMs += result.elapsedSeconds * 1000;
+      remaining -= result.elapsedSeconds;
+      if (result.collision || result.complete || gameState.phase !== 'running') return;
     }
-    applyAIDecision(item.action, item.latency);
-    if (gameState.phase !== 'running') return;
-    if (item.action === 'flap') requestAIDecision();
+    applyAIDecision('flap', action.latency);
   }
-  advancePhysics(delta);
+  if (remaining > 0 && gameState.phase === 'running') {
+    const result = advancePhysics(remaining);
+    gameState.ai.gameTimeMs += result.elapsedSeconds * 1000;
+  }
 }
 
 function settleJevResponse(requestId, error, packet) {
@@ -524,26 +621,44 @@ function postJevDecision(requestBody) {
 
 async function requestAIDecision() {
   if (gameState.mode !== 'physics' || !['starting', 'running'].includes(gameState.phase) || !jevStreamReady) return;
-  if (gameState.phase === 'starting' && jevInFlightCount > 0) return;
+  if (jevInFlightCount > 0) return;
   if (performance.now() < gameState.ai.retryAt) return;
-  const maxInFlight = gameState.ai.offline ? 1 : MAX_IN_FLIGHT_REQUESTS;
-  if (jevInFlightCount >= maxInFlight) return;
 
   const aiState = gameState.ai;
   const runToken = aiState.runToken;
-  const trajectoryVersion = gameState.ai.trajectoryVersion;
+  const trajectoryVersion = aiState.trajectoryVersion;
   const startedAt = performance.now();
-  const latencyEstimate = aiState.latencyEstimate;
-  const latencyProjection = getProjectedState(gameState.phase === 'starting' ? 0 : latencyEstimate / 1000);
-  const state = getAIState(latencyProjection);
+  const latencyBudgetMs = getLatencyBudget();
+  const targetGameTimeMs = gameState.phase === 'starting'
+    ? aiState.gameTimeMs
+    : Math.max(aiState.planEndMs + latencyBudgetMs, aiState.gameTimeMs + latencyBudgetMs);
+  const projectedWorld = projectCommittedPlan(targetGameTimeMs);
+  if (!projectedWorld) {
+    pauseForAIError('The committed plan does not safely reach the next Jev decision point.');
+    return;
+  }
+  const plans = buildCandidatePlans(projectedWorld, latencyBudgetMs);
+  if (!plans.length) {
+    pauseForAIError('No collision-free Jev plan options were available at the next decision point.');
+    return;
+  }
+  const state = {
+    ...getAIState(getProjectedState(0, projectedWorld)),
+    decision_at_game_ms: Math.round(targetGameTimeMs),
+    committed_plan_end_ms: Math.round(aiState.planEndMs),
+    planning_horizon_ms: PLAN_HORIZON_MS,
+    candidate_plans: plans.map(({ id, actions_ms, minimum_clearance, horizon_ms }) => ({ id, actions_ms, minimum_clearance, horizon_ms })),
+  };
   const requestBody = {
     state,
+    plans,
     trajectory_version: trajectoryVersion,
   };
   jevInFlightCount += 1;
   updateUI();
 
   let traceRecorded = false;
+  let requestAgain = false;
   try {
     const event = await postJevDecision(requestBody);
     const payload = event.body || {};
@@ -553,31 +668,24 @@ async function requestAIDecision() {
     }
     if (event.status !== 200) throw new Error(payload.error || 'Jev could not make a decision.');
     if (gameState.ai.runToken !== runToken || !['starting', 'running'].includes(gameState.phase) || gameState.mode !== 'physics') return;
-    if (!['flap', 'wait'].includes(payload.action) || payload.trajectory_version !== trajectoryVersion) {
-      throw new Error('Jev returned an invalid action.');
-    }
+    const selectedPlan = plans.find((plan) => plan.id === payload.plan_id);
+    if (payload.action !== 'plan' || !selectedPlan || payload.trajectory_version !== trajectoryVersion) throw new Error('Jev returned an invalid plan.');
 
     gameState.ai.confidence = payload.confidence;
     const requestLatency = performance.now() - startedAt;
     gameState.ai.latency = Math.round(requestLatency);
-    gameState.ai.latencyEstimate = Math.round(gameState.ai.latencyEstimate * 0.8 + Math.min(requestLatency, 1000) * 0.2);
+    aiState.latencyEstimate = Math.round(aiState.latencyEstimate * 0.8 + Math.min(requestLatency, 1800) * 0.2);
+    aiState.latencySamples.push(requestLatency);
+    aiState.latencySamples = aiState.latencySamples.slice(-12);
     gameState.ai.error = null;
     gameState.ai.offline = false;
     gameState.ai.retryAt = 0;
-    if (gameState.phase === 'starting') {
-      gameState.phase = 'running';
-      applyAIDecision(payload.action, requestLatency);
-      if (payload.action === 'flap') gameState.ai.trajectoryVersion += 1;
-      requestAIDecision();
-    } else if (trajectoryVersion === gameState.ai.trajectoryVersion) {
-      const executeAt = startedAt + latencyEstimate;
-      gameState.ai.pendingResponses.push({
-        action: payload.action,
-        trajectoryVersion,
-        executeAt: Math.max(performance.now(), executeAt),
-        latency: requestLatency,
-      });
-    }
+    if (targetGameTimeMs < aiState.gameTimeMs) throw new Error('Jev plan arrived after its projected decision time.');
+    aiState.plannedActions.push(...selectedPlan.actions_ms.map((offsetMs) => ({ atMs: targetGameTimeMs + offsetMs, latency: requestLatency })));
+    aiState.planEndMs = targetGameTimeMs + PLAN_HORIZON_MS;
+    aiState.trajectoryVersion += 1;
+    if (gameState.phase === 'starting') gameState.phase = 'running';
+    requestAgain = true;
   } catch (error) {
     if (!traceRecorded) addJevLog(makeClientTrace(requestBody, null, false, error.message, performance.now() - startedAt));
     if (gameState.ai.runToken === runToken && ['starting', 'running'].includes(gameState.phase)) {
@@ -588,6 +696,7 @@ async function requestAIDecision() {
   } finally {
     jevInFlightCount = Math.max(0, jevInFlightCount - 1);
     updateUI();
+    if (requestAgain) requestAIDecision();
   }
 }
 
