@@ -458,6 +458,7 @@ function buildCandidatePlans(world, latencyBudgetMs) {
     if (selected.length) schedules.push([...selected]);
     if (!remaining) return;
     for (let index = start; index < slots.length; index += 1) {
+      if (selected.length && slots[index] - selected[selected.length - 1] < 350) continue;
       selected.push(slots[index]);
       addCombinations(index + 1, remaining - 1, selected);
       selected.pop();
