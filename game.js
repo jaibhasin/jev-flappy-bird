@@ -33,22 +33,11 @@ const dom = {
   humanMode: document.querySelector('#human-mode'),
   physicsMode: document.querySelector('#physics-mode'),
   controlHint: document.querySelector('#control-hint'),
-  inspectorTitle: document.querySelector('#inspector-title'),
-  actionLabel: document.querySelector('#action-label'),
-  nextAction: document.querySelector('#next-action'),
-  birdHeight: document.querySelector('#bird-height'),
-  birdSpeed: document.querySelector('#bird-speed'),
-  pipeDistance: document.querySelector('#pipe-distance'),
-  gapOffset: document.querySelector('#gap-offset'),
-  aiConfidence: document.querySelector('#ai-confidence'),
-  aiLatency: document.querySelector('#ai-latency'),
-  historyCount: document.querySelector('#history-count'),
-  inspectorNote: document.querySelector('#inspector-note p'),
-  jevLogCount: document.querySelector('#jev-log-count'),
-  jevLogs: document.querySelector('#jev-logs'),
-  clearJevLogs: document.querySelector('#clear-jev-logs'),
-  resetButton: document.querySelector('#reset-button'),
-  clearExperience: document.querySelector('#clear-experience'),
+  jevQuestion: document.querySelector('#jev-question'),
+  jevState: document.querySelector('#jev-state'),
+  jevChoices: document.querySelector('#jev-choices'),
+  jevAction: document.querySelector('#jev-action'),
+  jevProbabilities: document.querySelector('#jev-probabilities'),
 };
 
 let gameState;
@@ -160,7 +149,6 @@ function applyModeUI() {
   document.body.classList.toggle('ai-mode', isPhysics);
   dom.humanMode.classList.toggle('active', !isPhysics);
   dom.physicsMode.classList.toggle('active', isPhysics);
-  dom.inspectorTitle.textContent = isPhysics ? "Jev's controls" : 'Your controls';
   dom.controlHint.innerHTML = isPhysics ? 'Jev is flying this run' : '<kbd>Space</kbd> or <kbd>↑</kbd> or click to flap';
 }
 
@@ -275,60 +263,39 @@ function pauseForAIError(message) {
   dom.overlay.classList.remove('hidden');
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
-
-function prettyJson(value) {
-  return escapeHtml(JSON.stringify(value, null, 2));
-}
-
-function formatTraceTime(value) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? 'Unknown time' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-}
-
-function renderJevLogs() {
-  if (!dom.jevLogs || !dom.jevLogCount) return;
-  dom.jevLogCount.textContent = jevLogs.length;
-  if (jevLogs.length === 0) {
-    dom.jevLogs.innerHTML = '<li class="jev-log-empty">No Jev calls yet.</li>';
-    return;
-  }
-
-  dom.jevLogs.innerHTML = [...jevLogs].reverse().map((trace) => {
-    const result = trace.result || {};
-    const state = trace.request?.state?.current_state || {};
-    const action = result.action || (Array.isArray(result.actions) ? result.actions.map((item) => item === 'flap' ? 'F' : 'W').join(' ') : '');
-    const status = trace.ok ? 'Success' : 'Failed';
-    const summary = trace.ok ? `Jev chose ${action || 'an action'}` : trace.error || 'Request failed';
-    const confidence = result.confidence === null || result.confidence === undefined ? '' : ` · ${Math.round(result.confidence * 100)}% confidence`;
-    return `<li class="jev-log-entry ${trace.ok ? '' : 'is-error'}">
-      <div class="jev-log-summary">
-        <div><strong>${escapeHtml(summary)}</strong><span>${escapeHtml(status)} · ${escapeHtml(formatTraceTime(trace.at))}</span></div>
-        <span class="jev-log-latency">${escapeHtml(trace.duration_ms ?? '-')} ms</span>
-      </div>
-      <p class="jev-log-context">Bird ${escapeHtml(state.bird_y ?? '-')} px · Pipe ${escapeHtml(state.pipe_distance ?? '-')} px away${escapeHtml(confidence)}</p>
-      <details>
-        <summary>See request and response</summary>
-        <div class="jev-log-detail">
-          <div><span>Sent to Jev</span><pre>${prettyJson(trace.request || {})}</pre></div>
-          <div><span>Jev response</span><pre>${prettyJson(trace.response || { error: trace.error })}</pre></div>
-        </div>
-      </details>
-    </li>`;
-  }).join('');
-}
-
 function addJevLog(trace) {
   if (!trace) return;
   jevLogs = [...jevLogs, trace].slice(-50);
-  renderJevLogs();
+  renderJevTrace(trace);
+}
+
+function formatProbabilities(probabilities = {}) {
+  const entries = Object.entries(probabilities);
+  if (!entries.length) return 'Probabilities: unavailable';
+  return `Probabilities: ${entries.map(([choice, probability]) => {
+    const value = Number(probability);
+    const formatted = Number.isFinite(value) ? `${Math.round((value <= 1 ? value * 100 : value))}%` : String(probability);
+    return `${choice} ${formatted}`;
+  }).join(' · ')}`;
+}
+
+function renderJevTrace(trace) {
+  const modelRequest = trace.request || {};
+  const question = modelRequest.questions?.action?.instructions?.question;
+  const choices = Object.keys(modelRequest.questions?.action?.criteria || {});
+  const state = modelRequest.state?.current_state || {};
+  const result = trace.result || {};
+  const requestSummary = [
+    state.bird_y === undefined ? '' : `bird ${state.bird_y}px`,
+    state.bird_velocity === undefined ? '' : `speed ${state.bird_velocity}px/s`,
+    state.pipe_distance == null ? '' : `pipe ${state.pipe_distance}px`,
+    state.gap_offset === undefined ? '' : `gap offset ${state.gap_offset}px`,
+  ].filter(Boolean).join(' · ');
+  if (question) dom.jevQuestion.textContent = question;
+  dom.jevState.textContent = trace.error || requestSummary || 'Game state sent';
+  if (choices.length) dom.jevChoices.textContent = `Choices: ${choices.join(' · ')}`;
+  dom.jevAction.textContent = result.action || (trace.ok ? '-' : 'Request failed');
+  dom.jevProbabilities.textContent = formatProbabilities(result.probabilities);
 }
 
 async function loadJevLogs() {
@@ -337,7 +304,7 @@ async function loadJevLogs() {
     const payload = await response.json();
     if (response.ok && Array.isArray(payload.logs)) {
       jevLogs = payload.logs;
-      renderJevLogs();
+      if (jevLogs.length) renderJevTrace(jevLogs[jevLogs.length - 1]);
     }
   } catch {
     // The game remains usable if the local log endpoint is unavailable.
@@ -543,30 +510,8 @@ async function requestAIDecision() {
 
 function updateUI() {
   if (!gameState) return;
-  const pipe = getNextPipe();
-  const offset = pipe ? gameState.bird.y - (pipe.gapTop + pipe.gapBottom) / 2 : 0;
   dom.score.textContent = gameState.score;
-  dom.seedValue.textContent = SEED;
-  dom.birdHeight.textContent = `${Math.round(gameState.bird.y)} px`;
-  dom.birdSpeed.textContent = `${gameState.bird.velocity >= 0 ? '+' : ''}${Math.round(gameState.bird.velocity)} px/s`;
-  dom.pipeDistance.textContent = pipe ? `${Math.max(0, Math.round(pipe.x - BIRD_X))} px` : '-';
-  dom.gapOffset.textContent = `${offset >= 0 ? '+' : ''}${Math.round(offset)} px`;
-
-  if (gameState.mode === 'physics') {
-    dom.actionLabel.textContent = 'Last action';
-    dom.nextAction.textContent = gameState.ai.pendingResponses.length > 0 ? 'Planning' : gameState.ai.lastAction === 'flap' ? 'Flap' : 'Wait';
-    dom.aiConfidence.textContent = gameState.ai.confidence === null ? '-' : `${Math.round(gameState.ai.confidence * 100)}%`;
-    dom.aiLatency.textContent = gameState.ai.latency === null ? '-' : `${gameState.ai.latency} ms`;
-    dom.historyCount.textContent = `${physicsHistory.size} / 100`;
-    dom.inspectorNote.textContent = gameState.ai.error || `Latency estimate: ${gameState.ai.latencyEstimate} ms.`;
-  } else {
-    dom.actionLabel.textContent = 'Next action';
-    dom.nextAction.textContent = gameState.phase === 'running' ? 'Your call' : 'Waiting';
-    dom.aiConfidence.textContent = '-';
-    dom.aiLatency.textContent = '-';
-    dom.historyCount.textContent = '0 / 100';
-    dom.inspectorNote.textContent = gameState.phase === 'running' ? 'The pipe pattern is deterministic. Find a rhythm that works.' : 'Play a run to see the game state update here.';
-  }
+  dom.runStatus.textContent = gameState.phase === 'running' ? 'Playing' : gameState.phase === 'over' ? 'Game over' : gameState.phase === 'aierror' ? 'Paused' : 'Ready';
 }
 
 function drawBackground() {
@@ -685,20 +630,6 @@ function loop(now) {
 }
 
 dom.startButton.addEventListener('click', startGame);
-dom.resetButton.addEventListener('click', () => resetGame());
-dom.clearExperience.addEventListener('click', () => {
-  physicsHistory.clear();
-  resetGame('physics');
-});
-dom.clearJevLogs.addEventListener('click', async () => {
-  try {
-    await fetch('/api/jev/logs', { method: 'DELETE' });
-  } catch {
-    // Clearing the visible session is still useful if the local endpoint is unavailable.
-  }
-  jevLogs = [];
-  renderJevLogs();
-});
 dom.humanMode.addEventListener('click', () => setMode('human'));
 dom.physicsMode.addEventListener('click', () => setMode('physics'));
 canvas.addEventListener('pointerdown', flap);
