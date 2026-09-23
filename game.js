@@ -115,9 +115,9 @@ function resetGame(mode = gameState?.mode || 'human') {
 }
 
 function startGame() {
-  if (gameState.phase === 'running') return;
+  if (gameState.phase === 'running' || gameState.phase === 'starting') return;
   if (gameState.phase === 'gameover' || gameState.phase === 'aierror') resetGame();
-  gameState.phase = 'running';
+  gameState.phase = gameState.mode === 'physics' ? 'starting' : 'running';
   dom.overlay.classList.add('hidden');
   dom.runStatus.textContent = 'Flying';
   if (gameState.mode === 'physics') {
@@ -472,7 +472,7 @@ function connectJevEventStream() {
   jevEventSource = new EventSource(`/api/jev/stream?client=${encodeURIComponent(jevClientId)}`);
   jevEventSource.onopen = () => {
     jevStreamReady = true;
-    if (gameState?.mode === 'physics' && gameState.phase === 'running') {
+    if (gameState?.mode === 'physics' && ['starting', 'running'].includes(gameState.phase)) {
       gameState.ai.error = null;
       gameState.ai.offline = false;
       gameState.ai.retryAt = 0;
@@ -523,7 +523,8 @@ function postJevDecision(requestBody) {
 }
 
 async function requestAIDecision() {
-  if (gameState.mode !== 'physics' || gameState.phase !== 'running' || !jevStreamReady) return;
+  if (gameState.mode !== 'physics' || !['starting', 'running'].includes(gameState.phase) || !jevStreamReady) return;
+  if (gameState.phase === 'starting' && jevInFlightCount > 0) return;
   if (performance.now() < gameState.ai.retryAt) return;
   const maxInFlight = gameState.ai.offline ? 1 : MAX_IN_FLIGHT_REQUESTS;
   if (jevInFlightCount >= maxInFlight) return;
@@ -534,7 +535,7 @@ async function requestAIDecision() {
   const startedAt = performance.now();
   const latencyEstimate = aiState.latencyEstimate;
   const planningWorld = cloneWorld(gameState);
-  const latencyProjection = getProjectedState(latencyEstimate / 1000, planningWorld);
+  const latencyProjection = getProjectedState(gameState.phase === 'starting' ? 0 : latencyEstimate / 1000, planningWorld);
   advanceWorld(planningWorld, latencyEstimate / 1000);
   const state = getAIState(latencyProjection);
   const requestBody = {
@@ -553,7 +554,7 @@ async function requestAIDecision() {
       traceRecorded = true;
     }
     if (event.status !== 200) throw new Error(payload.error || 'Jev could not make a decision.');
-    if (gameState.ai.runToken !== runToken || gameState.phase !== 'running' || gameState.mode !== 'physics') return;
+    if (gameState.ai.runToken !== runToken || !['starting', 'running'].includes(gameState.phase) || gameState.mode !== 'physics') return;
     if (!['flap', 'wait'].includes(payload.action) || payload.trajectory_version !== trajectoryVersion) {
       throw new Error('Jev returned an invalid action.');
     }
@@ -565,7 +566,12 @@ async function requestAIDecision() {
     gameState.ai.error = null;
     gameState.ai.offline = false;
     gameState.ai.retryAt = 0;
-    if (trajectoryVersion === gameState.ai.trajectoryVersion) {
+    if (gameState.phase === 'starting') {
+      gameState.phase = 'running';
+      applyAIDecision(payload.action, requestLatency);
+      if (payload.action === 'flap') gameState.ai.trajectoryVersion += 1;
+      requestAIDecision();
+    } else if (trajectoryVersion === gameState.ai.trajectoryVersion) {
       const executeAt = startedAt + latencyEstimate;
       gameState.ai.pendingResponses.push({
         action: payload.action,
@@ -576,7 +582,7 @@ async function requestAIDecision() {
     }
   } catch (error) {
     if (!traceRecorded) addJevLog(makeClientTrace(requestBody, null, false, error.message, performance.now() - startedAt));
-    if (gameState.ai.runToken === runToken && gameState.phase === 'running') {
+    if (gameState.ai.runToken === runToken && ['starting', 'running'].includes(gameState.phase)) {
       gameState.ai.error = error.message;
       gameState.ai.offline = true;
       gameState.ai.retryAt = performance.now() + 500;
@@ -592,6 +598,7 @@ function updateUI() {
   dom.score.textContent = gameState.score;
   dom.runStatus.textContent = gameState.phase === 'running'
     ? gameState.ai.offline && gameState.mode === 'physics' ? 'Jev offline' : 'Playing'
+    : gameState.phase === 'starting' ? 'Waiting for Jev'
     : gameState.phase === 'gameover' ? 'Game over' : gameState.phase === 'aierror' ? 'Paused' : 'Ready';
   if (gameState.mode === 'physics' && gameState.ai.offline) {
     dom.jevState.textContent = `${gameState.ai.error}. Retrying shortly.`;

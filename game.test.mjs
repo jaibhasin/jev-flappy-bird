@@ -4,7 +4,6 @@ import test from 'node:test';
 function createElement() {
   const listeners = new Map();
   const classes = new Set();
-
   return {
     classList: {
       add: (...names) => names.forEach((name) => classes.add(name)),
@@ -19,95 +18,78 @@ function createElement() {
   };
 }
 
-test('the game initializes and the start button begins a run', async () => {
+test('Jev waits for its first answer before the bird starts falling', async () => {
+  let now = 0;
   let nextFrame;
+  let intervalTick;
+  let stream;
   const requests = [];
   const selectors = [
     '#score', '#seed-value', '#run-status', '#start-overlay', '#overlay-kicker',
     '#overlay-title', '#overlay-copy', '#start-button', '#human-mode',
-    '#physics-mode', '#control-hint', '#inspector-title', '#action-label',
-    '#next-action', '#bird-height', '#bird-speed', '#pipe-distance',
-    '#gap-offset', '#ai-confidence', '#ai-latency', '#history-count',
-    '#reset-button', '#clear-experience', '#jev-log-count', '#jev-logs', '#clear-jev-logs',
+    '#physics-mode', '#control-hint', '#jev-question', '#jev-state',
+    '#jev-choices', '#jev-action', '#jev-probabilities',
   ];
   const elements = new Map(selectors.map((selector) => [selector, createElement()]));
-  const inspectorNote = createElement();
-  elements.set('#inspector-note p', inspectorNote);
-
   const canvas = createElement();
   canvas.width = 540;
   canvas.height = 720;
   canvas.getContext = () => ({
-    arc() {},
-    beginPath() {},
-    closePath() {},
+    arc() {}, beginPath() {}, closePath() {}, ellipse() {}, fill() {},
+    fillRect() {}, lineTo() {}, moveTo() {}, restore() {}, rotate() {},
+    save() {}, stroke() {}, translate() {},
     createLinearGradient: () => ({ addColorStop() {} }),
-    ellipse() {},
-    fill() {},
-    fillRect() {},
-    lineTo() {},
-    moveTo() {},
-    restore() {},
-    rotate() {},
-    save() {},
-    stroke() {},
-    translate() {},
   });
   elements.set('#game', canvas);
 
-  globalThis.document = {
-    body: createElement(),
-    querySelector: (selector) => elements.get(selector) ?? null,
-  };
+  globalThis.performance = { now: () => now };
+  globalThis.document = { body: createElement(), querySelector: (selector) => elements.get(selector) ?? null };
   globalThis.window = { addEventListener() {} };
-  let resolveActionResponse;
-  const actionResponse = new Promise((resolve) => {
-    resolveActionResponse = resolve;
-  });
+  globalThis.EventSource = class {
+    constructor() { stream = this; }
+  };
   globalThis.fetch = async (url, options) => {
-    if (url === '/api/jev/logs') {
-      return { ok: true, json: async () => ({ logs: [] }) };
-    }
+    if (url === '/api/jev/logs') return { ok: true, json: async () => ({ logs: [] }) };
     requests.push(JSON.parse(options.body));
-    return actionResponse;
+    return { status: 202 };
   };
-  globalThis.requestAnimationFrame = (callback) => {
-    nextFrame = callback;
-    return 1;
-  };
+  globalThis.requestAnimationFrame = (callback) => { nextFrame = callback; return 1; };
   globalThis.cancelAnimationFrame = () => {};
+  globalThis.setInterval = (callback) => { intervalTick = callback; return 1; };
+  globalThis.clearInterval = () => {};
+  globalThis.setTimeout = () => 1;
+  globalThis.clearTimeout = () => {};
 
   await import('./game.js');
-
-  assert.equal(elements.get('#run-status').textContent, 'Ready');
-  assert.equal(elements.get('#bird-height').textContent, '324 px');
-
-  elements.get('#start-button').click();
-
-  assert.equal(elements.get('#run-status').textContent, 'Flying');
-  assert.equal(elements.get('#start-overlay').classList.contains('hidden'), true);
-
   elements.get('#physics-mode').click();
   elements.get('#start-button').click();
+  assert.equal(elements.get('#run-status').textContent, 'Waiting for Jev');
+
+  stream.onopen();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].state.after_ms, 0);
+  const initialY = requests[0].state.bird_y;
+
+  now = 1200;
+  nextFrame(now);
+  assert.equal(elements.get('#run-status').textContent, 'Waiting for Jev');
+  assert.equal(requests.length, 1);
+
+  stream.onmessage({ data: JSON.stringify({
+    rid: requests[0].rid,
+    status: 200,
+    body: { action: 'flap', trajectory_version: 0, confidence: 1 },
+  }) });
   await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get('#run-status').textContent, 'Playing');
+  assert.equal(requests.length, 2);
+  assert.ok(requests[1].state.bird_y < initialY);
+  assert.equal(requests[1].trajectory_version, 1);
+  assert.equal(requests[1].state.after_ms, 424);
 
-  assert.equal(requests[0].sequences.length > 1, true);
-  assert.equal(requests[0].sequences.every((sequence) => sequence.actions.length === 12), true);
-
-  const initialPhysicsHeight = elements.get('#bird-height').textContent;
-  const firstFrameTime = performance.now() + 100;
-  nextFrame(firstFrameTime);
-  assert.equal(elements.get('#bird-height').textContent, initialPhysicsHeight);
-
-  resolveActionResponse({
-    ok: true,
-    json: async () => ({
-      actions: Array(12).fill('wait'),
-      confidence: 0.8,
-    }),
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  nextFrame(firstFrameTime + 100);
-
-  assert.notEqual(elements.get('#bird-height').textContent, initialPhysicsHeight);
+  now = 1234;
+  nextFrame(now);
+  intervalTick();
+  assert.equal(requests.length, 3);
+  assert.ok(requests[1].state.pipe_distance - requests[2].state.pipe_distance >= 6);
 });
