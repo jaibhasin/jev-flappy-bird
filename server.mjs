@@ -90,32 +90,27 @@ async function handleJevAction(request, response) {
     return;
   }
 
-  const sequences = Array.isArray(input.sequences) ? input.sequences.filter((sequence) => (
-    typeof sequence?.id === 'string'
-    && typeof sequence.description === 'string'
-    && Array.isArray(sequence.actions)
-    && sequence.actions.length === 12
-    && sequence.actions.every((action) => action === 'flap' || action === 'wait')
-  )) : [];
-  if (sequences.length === 0) {
-    sendError(response, 400, 'At least one valid action sequence is required.');
+  if (!Number.isInteger(input.trajectory_version) || input.trajectory_version < 0) {
+    sendError(response, 400, 'A valid trajectory version is required.');
     return;
   }
 
-  const sequenceCriteria = Object.fromEntries(sequences.map((sequence) => [sequence.id, sequence.description]));
   const traceId = randomUUID();
   const startedAt = Date.now();
   const modelRequest = {
     state: input.state,
     model: MODEL,
     questions: {
-      action_plan: {
+      action: {
         type: 'choice',
         instructions: {
-          question: 'Choose the seven-step action sequence most likely to keep the bird alive and pass the next pipe.',
-          guidance: 'Only collision-free sequences are offered when one exists. First prefer more pipes passed, then prefer an ending gap offset closest to zero. Each step lasts 1/7 second.',
+          question: 'Should the bird flap now or wait?',
+          guidance: 'The supplied game state is predicted for the time this decision is intended to execute. Choose the action that best keeps the bird alive and passing the next pipe.',
         },
-        criteria: sequenceCriteria,
+        criteria: {
+          flap: 'Set the bird velocity upward immediately. Choose this when it improves the predicted path through the next pipe.',
+          wait: 'Continue the current trajectory under gravity. Choose this when another flap would make survival less likely.',
+        },
       },
     },
   };
@@ -139,14 +134,14 @@ async function handleJevAction(request, response) {
     }
 
     const payload = await upstream.json();
-    const answer = payload.answers?.action_plan;
-    const selectedSequence = sequences.find((sequence) => sequence.id === answer?.choice);
-    if (!answer || !selectedSequence) {
-      throw new Error('TypeSafe returned an invalid action plan.');
+    const answer = payload.answers?.action;
+    if (!answer || !['flap', 'wait'].includes(answer.choice)) {
+      throw new Error('TypeSafe returned an invalid action.');
     }
 
     const appResponse = {
-      actions: selectedSequence.actions,
+      action: answer.choice,
+      trajectory_version: input.trajectory_version,
       confidence: answer.confidence ?? null,
       probabilities: answer.probabilities ?? {},
     };
