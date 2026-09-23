@@ -19,7 +19,6 @@ const GRAVITY = 950;
 const FLAP_VELOCITY = -330;
 const AI_REQUEST_INTERVAL_MS = 20;
 const INITIAL_LATENCY_ESTIMATE_MS = 200;
-const AI_PROJECTION_TIMES = [0, 0.1, 0.2, 0.3, 0.4, 0.5];
 const physicsHistory = new MoveHistory(100);
 
 const dom = {
@@ -406,7 +405,7 @@ function cloneWorld(world = gameState) {
   };
 }
 
-function getAIState(world = gameState) {
+function getAIState(world = gameState, latencyProjection) {
   return {
     current_state: getGameSnapshot(world),
     physics: {
@@ -416,7 +415,7 @@ function getAIState(world = gameState) {
       decision_interval_ms: AI_REQUEST_INTERVAL_MS,
       positive_y_direction: 'down',
     },
-    projected_states: AI_PROJECTION_TIMES.map((seconds) => getProjectedState(seconds, world)),
+    projected_states: [latencyProjection],
   };
 }
 
@@ -492,8 +491,9 @@ async function requestAIDecision() {
   const startedAt = performance.now();
   const latencyEstimate = gameState.ai.latencyEstimate;
   const planningWorld = cloneWorld(gameState);
+  const latencyProjection = getProjectedState(latencyEstimate / 1000, planningWorld);
   advanceWorld(planningWorld, latencyEstimate / 1000);
-  const state = getAIState(planningWorld);
+  const state = getAIState(planningWorld, latencyProjection);
   const requestBody = {
     state,
     trajectory_version: trajectoryVersion,
