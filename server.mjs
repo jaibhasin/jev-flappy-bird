@@ -18,12 +18,12 @@ const WARM_AFTER_IDLE_MS = WARM_EVERY_MS / 2;
 const JEV_LOG_LIMIT = 50;
 const JEV_LOG_PATH = `${ROOT}jev-logs.jsonl`;
 const ACTION_INSTRUCTIONS = {
-  question: 'Should the bird flap now or wait?',
-  guidance: 'Choose the action that best keeps the bird alive and passing the next pipe.',
+  question: 'At the projected moment, should the bird flap once or wait to pass the next pipe?',
+  guidance: 'Use the bird position and motion relative to the next gap.',
 };
 const ACTION_CRITERIA = {
-  flap: 'The bird moves upward immediately. Choose this when it improves the path through the next pipe.',
-  wait: 'The bird continues under gravity. Choose this when another flap would make survival less likely.',
+  flap: 'Flap when the bird is below the gap, or inside the gap in its lower half and not rising.',
+  wait: 'Wait when the bird is above the gap, inside its upper half, or rising inside the gap, even if it is falling fast above the gap.',
 };
 
 const PORT = Number(process.env.PORT || 4173);
