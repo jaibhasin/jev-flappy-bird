@@ -181,7 +181,7 @@ async function handleJevAction(request, response) {
   }
   if (!Array.isArray(input.plans) || input.plans.length < 1 || input.plans.length > 32
     || input.plans.some((plan) => !plan || typeof plan.id !== 'string' || !Array.isArray(plan.actions_ms)
-      || plan.actions_ms.length > 4 || plan.actions_ms.some((time) => !Number.isInteger(time) || time < 0 || time >= 1800))) {
+      || plan.actions_ms.length > 10 || plan.actions_ms.some((time) => !Number.isInteger(time) || time < 0 || time >= 3200))) {
     sendError(response, 400, 'One to 32 valid candidate plans are required.');
     return;
   }

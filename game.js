@@ -19,8 +19,7 @@ const GRAVITY = 950;
 const FLAP_VELOCITY = -330;
 const AI_REQUEST_INTERVAL_MS = 50;
 const INITIAL_LATENCY_ESTIMATE_MS = 280;
-const PLAN_HORIZON_MS = 1800;
-const PLAN_STEP_MS = 200;
+const PLAN_HORIZON_MS = 3200;
 const MAX_PLAN_OPTIONS = 32;
 const JEV_REQUEST_TIMEOUT_MS = 6000;
 const physicsHistory = new MoveHistory(100);
@@ -295,8 +294,9 @@ function formatProbabilities(probabilities = {}) {
 
 function renderJevTrace(trace) {
   const modelRequest = trace.request || {};
-  const question = modelRequest.questions?.action?.instructions?.question;
-  const choices = Object.keys(modelRequest.questions?.action?.criteria || {});
+  const planQuestion = modelRequest.questions?.plan?.instructions?.question;
+  const question = planQuestion || modelRequest.questions?.action?.instructions?.question;
+  const choices = Object.keys(modelRequest.questions?.plan?.criteria || modelRequest.questions?.action?.criteria || {});
   const state = modelRequest.state || {};
   const result = trace.result || {};
   const requestSummary = [
@@ -307,11 +307,14 @@ function renderJevTrace(trace) {
   ].filter(Boolean).join(' · ');
   if (question) dom.jevQuestion.textContent = question;
   dom.jevState.textContent = trace.error || requestSummary || 'Game state sent';
-  if (choices.length) dom.jevChoices.textContent = `Choices: ${choices.join(' · ')}`;
+  if (choices.length) dom.jevChoices.textContent = planQuestion ? `Collision-free plans considered: ${choices.length}` : `Choices: ${choices.join(' · ')}`;
   dom.jevAction.textContent = result.plan_id
     ? `${result.plan_id}: ${result.actions_ms?.join(', ') || 'wait'} ms`
     : result.action || (trace.ok ? '-' : 'Request failed');
-  dom.jevProbabilities.textContent = formatProbabilities(result.probabilities);
+  const selectedProbability = result.plan_id ? result.probabilities?.[result.plan_id] : null;
+  dom.jevProbabilities.textContent = result.plan_id && selectedProbability !== undefined
+    ? `Selected plan probability: ${Math.round(Number(selectedProbability) * 100)}%`
+    : formatProbabilities(result.probabilities);
 }
 
 async function loadJevLogs() {
@@ -453,19 +456,19 @@ function projectCommittedPlan(targetGameTimeMs) {
 }
 
 function buildCandidatePlans(world, latencyBudgetMs) {
-  const slots = Array.from({ length: PLAN_HORIZON_MS / PLAN_STEP_MS }, (_, index) => index * PLAN_STEP_MS);
   const schedules = [[]];
-  function addCombinations(start, remaining, selected) {
-    if (selected.length) schedules.push([...selected]);
-    if (!remaining) return;
-    for (let index = start; index < slots.length; index += 1) {
-      if (selected.length && slots[index] - selected[selected.length - 1] < 350) continue;
-      selected.push(slots[index]);
-      addCombinations(index + 1, remaining - 1, selected);
-      selected.pop();
+  const seenSchedules = new Set(['']);
+  for (let intervalMs = 400; intervalMs <= 1000; intervalMs += 50) {
+    for (let phaseMs = 0; phaseMs < intervalMs; phaseMs += 100) {
+      const actionsMs = [];
+      for (let actionAtMs = phaseMs; actionAtMs < PLAN_HORIZON_MS; actionAtMs += intervalMs) actionsMs.push(actionAtMs);
+      const key = actionsMs.join(',');
+      if (!seenSchedules.has(key)) {
+        schedules.push(actionsMs);
+        seenSchedules.add(key);
+      }
     }
   }
-  addCombinations(0, 4, []);
 
   const candidates = schedules.map((actionsMs) => {
     const result = simulateWorld(world, actionsMs, PLAN_HORIZON_MS + latencyBudgetMs);
