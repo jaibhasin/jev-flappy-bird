@@ -417,7 +417,6 @@ function getAIState(world = gameState) {
       positive_y_direction: 'down',
     },
     projected_states: AI_PROJECTION_TIMES.map((seconds) => getProjectedState(seconds, world)),
-    move_history: physicsHistory.getAll(),
   };
 }
 
