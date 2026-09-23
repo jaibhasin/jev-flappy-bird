@@ -159,6 +159,6 @@ test('Jev plans run at fixed speed across delayed answers and never use a fallba
     intervalTick();
   }
   assert.equal(elements.get('#run-status').textContent, 'Game over');
-  assert.ok(now - runStartedAt < 6000, 'No automatic flaps or latency freeze after the approved plan ends');
+  assert.ok(now - runStartedAt < 10000, 'No automatic flaps or latency freeze after the approved plan ends');
 
 });

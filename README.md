@@ -1,36 +1,34 @@
-# Flappy Bird + Jev 🐦 - Let Jev take the next flap.
+# Flappy Bird model race 🐦
 
-> A tiny browser game where you can fly yourself or hand the controls to Jev.
-
-[![Human mode](https://img.shields.io/badge/play-Human%20mode-32c7a5)](#pick-your-pilot)
-[![Jev mode](https://img.shields.io/badge/play-Jev%20mode-6957e8)](#how-jev-plays)
-[![Canvas](https://img.shields.io/badge/canvas-540%C3%97720-4c91e8)](#game-physics)
-[![Node.js](https://img.shields.io/badge/server-Node.js-43853d)](#run)
+Run two independent games side by side: Jev and GPT-6 Luna through the OpenAI API.
+Both games use the same seeded pipes, physics, and candidate-plan generator.
 
 ## Run
 
 ```bash
 cp .env.example .env
-# Add your TypeSafe API key to .env
+```
+
+Add your TypeSafe and OpenAI API keys to `.env`, then run:
+
+```bash
 npm start
 ```
 
-Open <http://localhost:4173>.
+Open <http://localhost:4173> and select **Start both games**.
 
-Run `npm run check` for syntax checks and game logic tests.
+Each game runs in its own frame, so its score, state, and model requests are independent.
+The API keys stay on the server.
 
-## Pick your pilot
+## How the models play
 
-- **Human mode:** Fly with Space, Up Arrow, click, or tap.
-- **With physics mode:** Jev picks a sequence of `flap` and `wait` actions while the game keeps moving at normal speed.
+The game simulates candidate flap schedules using its fixed physics.
+Each model receives the same projected state and up to 32 safe schedules for a 6.4-second game-time window.
+Jev selects a schedule through TypeSafe, and GPT-6 Luna selects one through the OpenAI Chat Completions API.
+The game applies the selected flaps and requests another schedule for the next window.
 
-## How Jev plays
-
-The server sends Jev the current planning state, physics values, projected positions, possible sequence outcomes, and the latest 100 moves.
-
-Jev returns one typed sequence of twelve `flap` or `wait` actions.
-The game applies one buffered action every `1/7` second through its normal physics.
-The API key stays on the server in `server.mjs`.
+Both games keep moving at 120 physics steps per second while waiting for the model.
+If a model fails to answer, the game uses the remaining approved schedule and does not create local fallback flaps.
 
 ## Game physics
 
@@ -39,4 +37,6 @@ The API key stays on the server in `server.mjs`.
 - Flap velocity: `-330 px/s`.
 - Pipe speed: `178 px/s`.
 - Pipe gap: `178 px`.
-- Pipe pattern: deterministic while `SEED` is fixed.
+- Pipe pattern: deterministic with `SEED = 1337`.
+
+Run `npm run check` for syntax checks and game logic tests.

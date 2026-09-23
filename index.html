@@ -3,13 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#09111f" />
-    <title>Flappy Bird</title>
+    <meta name="theme-color" content="#0b0d10" />
+    <title>Flappy Arena</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="app-shell">
-      <section class="game-layout" aria-label="Flappy Bird and Jev decisions">
+      <section class="comparison" id="comparison" hidden></section>
+      <section id="single-run">
+      <div class="runner-title" id="runner-title" hidden></div>
+      <section class="game-layout" aria-label="Flappy Bird and model decisions">
         <div class="game-column">
           <div class="mode-switch" aria-label="Game mode">
             <button class="mode-button active" id="human-mode" data-mode="human" type="button">Human</button>
@@ -36,21 +39,35 @@
           <p class="control-hint" id="control-hint"><kbd>Space</kbd> or click to flap</p>
         </div>
 
-        <aside class="jev-panel" aria-label="Jev request and response">
-          <section class="decision-block">
-            <h2>Sent to Jev</h2>
-            <p class="decision-question" id="jev-question">Should the bird flap now or wait?</p>
-            <p class="decision-state" id="jev-state">Waiting for a Jev request</p>
-            <p class="decision-state" id="jev-choices">Choices: flap · wait</p>
+        <aside class="jev-panel" aria-label="Model request and response">
+          <div class="telemetry-heading"><i class="live-dot"></i><span>LIVE TELEMETRY</span></div>
+          <section class="action-block">
+            <h2>Current action</h2>
+            <p class="live-action" id="live-action">READY</p>
+            <div class="action-track"><span id="action-fill"></span></div>
+            <div class="action-labels"><span>WAIT</span><span>FLAP</span></div>
           </section>
+          <div class="stats-grid">
+            <div><span>Score</span><strong id="stat-score">00</strong></div>
+            <div><span>Flight time</span><strong id="stat-time">0.0<span>s</span></strong></div>
+            <div><span>Last response</span><strong id="stat-latency">-</strong></div>
+            <div><span>Plans received</span><strong id="stat-plans">0</strong></div>
+          </div>
           <section class="decision-block response-block">
-            <h2>Jev response</h2>
-            <p class="decision-action" id="jev-action">-</p>
-            <div class="probabilities" id="jev-probabilities" aria-live="polite">Probabilities: -</div>
+            <h2 id="response-heading">Latest plan</h2>
+            <p class="decision-action" id="jev-action">Awaiting takeoff</p>
+            <div class="probabilities" id="jev-probabilities">No response yet</div>
           </section>
+          <details class="request-details"><summary id="sent-heading">Model input</summary>
+            <p class="decision-question" id="jev-question">Choose a timed flap plan.</p>
+            <p class="decision-state" id="jev-state">Waiting for a model request</p>
+            <p class="decision-state" id="jev-choices">Same physics. Same course.</p>
+          </details>
+          <div class="panel-footnote">MODEL SELECTS · BIRD FLIES</div>
         </aside>
       </section>
+      </section>
     </main>
-    <script type="module" src="game.js"></script>
+    <script type="module" src="bootstrap.js"></script>
   </body>
 </html>

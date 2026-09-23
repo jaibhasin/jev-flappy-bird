@@ -3,6 +3,9 @@ import { MoveHistory } from './ai-history.js';
 const canvas = document.querySelector('#game');
 const ctx = canvas.getContext('2d');
 
+const RUNNER = typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('runner');
+const CONTROLLER = RUNNER === 'openai' ? 'openai' : 'jev';
+const MODEL_LABEL = CONTROLLER === 'openai' ? 'GPT-6 Luna (OpenAI API)' : 'Jev';
 const WIDTH = canvas.width;
 const HEIGHT = canvas.height;
 const GROUND_HEIGHT = 92;
@@ -18,7 +21,7 @@ const COLLISION_RADIUS = 12;
 const GRAVITY = 950;
 const FLAP_VELOCITY = -330;
 const AI_REQUEST_INTERVAL_MS = 50;
-const PLAN_HORIZON_MS = 3200;
+const PLAN_HORIZON_MS = 6400;
 const MAX_PLAN_OPTIONS = 32;
 const JEV_REQUEST_TIMEOUT_MS = 6000;
 const physicsHistory = new MoveHistory(100);
@@ -35,6 +38,9 @@ const dom = {
   humanMode: document.querySelector('#human-mode'),
   physicsMode: document.querySelector('#physics-mode'),
   controlHint: document.querySelector('#control-hint'),
+  runnerTitle: document.querySelector('#runner-title'),
+  sentHeading: document.querySelector('#sent-heading'),
+  responseHeading: document.querySelector('#response-heading'),
   jevQuestion: document.querySelector('#jev-question'),
   jevState: document.querySelector('#jev-state'),
   jevChoices: document.querySelector('#jev-choices'),
@@ -54,6 +60,14 @@ let jevEventSource;
 let jevStreamReady = false;
 let jevRequestId = 0;
 let jevInFlightCount = 0;
+const EMBEDDED = Boolean(RUNNER && window.parent !== window);
+let comparisonMatchId = null;
+let scheduledLaunch = null;
+let lastReportedState = '';
+const telemetry = Object.fromEntries(['live-action', 'action-fill', 'stat-score', 'stat-time', 'stat-latency', 'stat-plans'].map((id) => [id, document.querySelector(`#${id}`)]));
+function reportToArena(type, extra = {}) {
+  if (EMBEDDED) window.parent.postMessage({ type, runner: RUNNER, matchId: comparisonMatchId, ...extra }, location.origin);
+}
 
 function seededRandom(seed) {
   let value = seed >>> 0;
@@ -85,6 +99,7 @@ function createAIState() {
     lastAction: 'wait',
     confidence: null,
     latency: null,
+    plansReceived: 0,
     error: null,
     offline: false,
     retryAt: 0,
@@ -100,6 +115,8 @@ function createAIState() {
 
 function resetGame(mode = gameState?.mode || 'human') {
   if (gameState?.ai?.requestTimer) clearInterval(gameState.ai.requestTimer);
+  scheduledLaunch = null;
+  physicsAccumulator = 0;
   gameState = {
     mode,
     phase: 'ready',
@@ -112,12 +129,14 @@ function resetGame(mode = gameState?.mode || 'human') {
   dom.runStatus.textContent = 'Ready';
   dom.overlay.classList.remove('hidden');
   showReadyOverlay();
+  dom.jevAction.textContent = 'Awaiting takeoff';
+  dom.jevProbabilities.textContent = 'No response yet';
   applyModeUI();
   updateUI();
 }
 
 function startGame() {
-  if (gameState.phase === 'running' || gameState.phase === 'starting') return;
+  if (['running', 'starting', 'armed'].includes(gameState.phase)) return;
   if (gameState.phase === 'gameover' || gameState.phase === 'aierror') resetGame();
   gameState.phase = gameState.mode === 'physics' ? 'starting' : 'running';
   lastFrame = performance.now();
@@ -152,8 +171,13 @@ function showReadyOverlay() {
   const isPhysics = gameState.mode === 'physics';
   dom.overlayKicker.textContent = isPhysics ? 'With physics' : 'Human mode';
   dom.overlayTitle.textContent = 'FLAPPY BIRD';
-  dom.overlayCopy.textContent = isPhysics ? 'Jev will choose when to flap using the game physics.' : 'Tap the game or press Space or Up Arrow to flap.';
-  dom.startButton.innerHTML = isPhysics ? 'Start AI run <span>↗</span>' : 'Start run <span>↗</span>';
+  dom.overlayCopy.textContent = isPhysics ? `${MODEL_LABEL} will choose when to flap using the game physics.` : 'Tap the game or press Space or Up Arrow to flap.';
+  if (EMBEDDED) {
+    dom.overlayKicker.textContent = 'Pilot ready';
+    dom.overlayTitle.textContent = 'BORN TO FLY.';
+    dom.overlayCopy.textContent = 'One course. Two pilots. Start the matchup above.';
+  }
+  dom.startButton.innerHTML = isPhysics ? `Start ${MODEL_LABEL} run <span>↗</span>` : 'Start run <span>↗</span>';
 }
 
 function applyModeUI() {
@@ -161,7 +185,7 @@ function applyModeUI() {
   document.body.classList.toggle('ai-mode', isPhysics);
   dom.humanMode.classList.toggle('active', !isPhysics);
   dom.physicsMode.classList.toggle('active', isPhysics);
-  dom.controlHint.innerHTML = isPhysics ? 'Jev is flying this run' : '<kbd>Space</kbd> or <kbd>↑</kbd> or click to flap';
+  dom.controlHint.innerHTML = isPhysics ? `${MODEL_LABEL} is flying this run` : '<kbd>Space</kbd> or <kbd>↑</kbd> or click to flap';
 }
 
 function setMode(mode) {
@@ -243,10 +267,10 @@ function endGame(reason = 'unknown') {
   gameState.phase = 'gameover';
   gameState.crashReason = reason;
   dom.runStatus.textContent = 'Crashed';
-  dom.overlayKicker.textContent = gameState.mode === 'physics' ? 'With physics' : 'Human mode';
+  dom.overlayKicker.textContent = gameState.mode === 'physics' ? `With ${MODEL_LABEL}` : 'Human mode';
   dom.overlayTitle.textContent = `Run ended at ${gameState.score}`;
-  dom.overlayCopy.textContent = gameState.mode === 'physics' ? `Jev hit the ${reason.replace('_', ' ')}. Try again to use the saved history.` : 'Same seed, same pipes. Try a different rhythm.';
-  dom.startButton.innerHTML = gameState.mode === 'physics' ? 'Try AI again <span>↗</span>' : 'Try again <span>↗</span>';
+  dom.overlayCopy.textContent = gameState.mode === 'physics' ? `${MODEL_LABEL} hit the ${reason.replace('_', ' ')}. Try again to replay the course.` : 'Same seed, same pipes. Try a different rhythm.';
+  dom.startButton.innerHTML = gameState.mode === 'physics' ? `Try ${MODEL_LABEL} again <span>↗</span>` : 'Try again <span>↗</span>';
   dom.overlay.classList.remove('hidden');
   updateUI();
 }
@@ -256,10 +280,10 @@ function completeGame() {
   finishPendingAIMove();
   gameState.phase = 'gameover';
   dom.runStatus.textContent = 'Complete';
-  dom.overlayKicker.textContent = gameState.mode === 'physics' ? 'With physics' : 'Human mode';
+  dom.overlayKicker.textContent = gameState.mode === 'physics' ? `With ${MODEL_LABEL}` : 'Human mode';
   dom.overlayTitle.textContent = `Run complete at ${gameState.score}`;
   dom.overlayCopy.textContent = 'You cleared every pipe in this seeded run.';
-  dom.startButton.innerHTML = gameState.mode === 'physics' ? 'Run it again <span>↗</span>' : 'Play again <span>↗</span>';
+  dom.startButton.innerHTML = gameState.mode === 'physics' ? `Run ${MODEL_LABEL} again <span>↗</span>` : 'Play again <span>↗</span>';
   dom.overlay.classList.remove('hidden');
   updateUI();
 }
@@ -297,7 +321,7 @@ function renderJevTrace(trace) {
   dom.jevState.textContent = trace.error || requestSummary || 'Game state sent';
   if (choices.length) dom.jevChoices.textContent = planQuestion ? `Collision-free plans considered: ${choices.length}` : `Choices: ${choices.join(' · ')}`;
   dom.jevAction.textContent = result.plan_id
-    ? `${result.plan_id}: ${result.actions_ms?.join(', ') || 'wait'} ms`
+    ? `${result.plan_id} · ${result.actions_ms?.length || 0} timed flaps`
     : result.action || (trace.ok ? '-' : 'Request failed');
   const selectedProbability = result.plan_id ? result.probabilities?.[result.plan_id] : null;
   dom.jevProbabilities.textContent = result.plan_id && selectedProbability !== undefined
@@ -549,6 +573,10 @@ function settleJevResponse(requestId, error, packet) {
 }
 
 function connectJevEventStream() {
+  if (CONTROLLER === 'openai') {
+    jevStreamReady = true;
+    return;
+  }
   if (typeof EventSource === 'undefined') return;
   jevEventSource = new EventSource(`/api/jev/stream?client=${encodeURIComponent(jevClientId)}`);
   jevEventSource.onopen = () => {
@@ -572,7 +600,7 @@ function connectJevEventStream() {
   jevEventSource.onerror = () => {
     jevStreamReady = false;
     if (gameState?.mode === 'physics' && gameState.phase === 'running') {
-      gameState.ai.error = 'Jev answer stream reconnecting';
+      gameState.ai.error = `${MODEL_LABEL} answer stream reconnecting`;
       gameState.ai.offline = true;
       gameState.ai.retryAt = performance.now() + 500;
     }
@@ -601,6 +629,19 @@ function postJevDecision(requestBody) {
       settleJevResponse(requestId, error);
     });
   });
+}
+
+
+async function requestModelDecision(requestBody) {
+  if (CONTROLLER === 'jev') return postJevDecision(requestBody);
+  const response = await fetch('/api/openai/action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(requestBody),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || 'OpenAI could not choose a plan.');
+  return { status: 200, body };
 }
 
 async function requestAIDecision() {
@@ -651,8 +692,9 @@ async function requestAIDecision() {
   let traceRecorded = false;
   let requestAgain = false;
   try {
-    const event = await postJevDecision(requestBody);
+    const event = await requestModelDecision(requestBody);
     const payload = event.body || {};
+    if (gameState.ai.runToken !== runToken) return;
     if (payload.trace) {
       addJevLog(payload.trace);
       traceRecorded = true;
@@ -662,6 +704,7 @@ async function requestAIDecision() {
     const selectedPlan = plans.find((plan) => plan.id === payload.plan_id);
     if (payload.action !== 'plan' || !selectedPlan || payload.trajectory_version !== trajectoryVersion) throw new Error('Jev returned an invalid plan.');
 
+    gameState.ai.plansReceived += 1;
     gameState.ai.confidence = payload.confidence;
     const requestLatency = performance.now() - startedAt;
     gameState.ai.latency = Math.round(requestLatency);
@@ -673,9 +716,10 @@ async function requestAIDecision() {
     aiState.planEndMs = targetGameTimeMs + PLAN_HORIZON_MS;
     aiState.trajectoryVersion += 1;
     if (gameState.phase === 'starting') {
-      gameState.phase = 'running';
+      gameState.phase = EMBEDDED ? 'armed' : 'running';
       lastFrame = performance.now();
       physicsAccumulator = 0;
+      if (EMBEDDED) reportToArena('runner-armed');
     }
     requestAgain = true;
   } catch (error) {
@@ -694,10 +738,35 @@ async function requestAIDecision() {
 
 function updateUI() {
   if (!gameState) return;
+  const ai = gameState.ai;
+  const action = gameState.phase === 'running' ? (gameState.flash > 0 ? 'FLAP' : 'WAIT')
+    : gameState.phase === 'armed' ? 'READY' : gameState.phase === 'starting' ? 'THINK' : gameState.phase === 'gameover' ? 'ENDED' : 'READY';
+  if (telemetry['live-action']) {
+    telemetry['live-action'].textContent = action;
+    telemetry['action-fill'].style.width = action === 'FLAP' ? '100%' : '8%';
+    telemetry['stat-score'].textContent = String(gameState.score).padStart(2, '0');
+    telemetry['stat-time'].textContent = `${(ai.gameTimeMs / 1000).toFixed(1)}s`;
+    telemetry['stat-latency'].textContent = ai.latency == null ? '-' : `${ai.latency}ms`;
+    telemetry['stat-plans'].textContent = ai.plansReceived;
+  }
+  if (EMBEDDED) {
+    const state = JSON.stringify([gameState.phase, gameState.score, ai.error]);
+    if (state !== lastReportedState) {
+      lastReportedState = state;
+      reportToArena('runner-state', { phase: gameState.phase, score: gameState.score, error: ai.error });
+    }
+    if (['starting', 'armed'].includes(gameState.phase)) {
+      dom.overlay.classList.remove('hidden');
+      dom.overlayKicker.textContent = gameState.phase === 'starting' ? 'Preparing flight plan' : 'Flight plan ready';
+      dom.overlayTitle.textContent = scheduledLaunch ? String(Math.max(1, Math.min(3, Math.ceil((scheduledLaunch - Date.now()) / 1000)))) : gameState.phase === 'armed' ? 'ALL SET.' : 'THINKING…';
+      dom.overlayCopy.textContent = ai.error ? 'Connection interrupted. Retrying…' : scheduledLaunch ? 'Get ready for takeoff.' : 'Both pilots launch together.';
+    }
+  }
   dom.score.textContent = gameState.score;
   dom.runStatus.textContent = gameState.phase === 'running'
-    ? gameState.ai.offline && gameState.mode === 'physics' ? 'Jev offline' : 'Playing'
-    : gameState.phase === 'starting' ? 'Waiting for Jev'
+    ? gameState.ai.offline && gameState.mode === 'physics' ? `${MODEL_LABEL} offline` : 'Playing'
+    : gameState.phase === 'armed' ? 'Ready for takeoff'
+    : gameState.phase === 'starting' ? `Waiting for ${MODEL_LABEL}`
     : gameState.phase === 'gameover' ? 'Game over' : gameState.phase === 'aierror' ? 'Paused' : 'Ready';
   if (gameState.mode === 'physics' && gameState.ai.offline) {
     dom.jevState.textContent = `${gameState.ai.error}. Retrying shortly.`;
@@ -706,13 +775,13 @@ function updateUI() {
 
 function drawBackground() {
   const sky = ctx.createLinearGradient(0, 0, 0, HEIGHT);
-  sky.addColorStop(0, '#162d4b');
-  sky.addColorStop(0.65, '#4d8baa');
-  sky.addColorStop(1, '#87b8af');
+  sky.addColorStop(0, '#2571cf');
+  sky.addColorStop(0.65, '#66c3e8');
+  sky.addColorStop(1, '#c5eee4');
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
 
-  ctx.globalAlpha = 0.42;
+  ctx.globalAlpha = 0.85;
   ctx.fillStyle = '#d8f2df';
   for (const cloud of [{ x: 74, y: 132, s: 1 }, { x: 366, y: 220, s: 0.72 }, { x: 274, y: 65, s: 0.45 }]) {
     ctx.beginPath();
@@ -722,18 +791,29 @@ function drawBackground() {
     ctx.fill();
   }
   ctx.globalAlpha = 1;
+  for (let layer = 0; layer < 2; layer += 1) {
+    ctx.fillStyle = layer ? '#7ccebb' : '#a1ded1';
+    ctx.beginPath();
+    ctx.moveTo(0, PLAY_BOTTOM);
+    for (let x = 0; x <= WIDTH; x += 6) {
+      ctx.lineTo(x, PLAY_BOTTOM - 25 - layer * 10 - Math.sin(x / 92 + layer * 2) * 24);
+    }
+    ctx.lineTo(WIDTH, PLAY_BOTTOM);
+    ctx.closePath();
+    ctx.fill();
+  }
 }
 
 function drawPipe(pipe) {
   const pipeGradient = ctx.createLinearGradient(pipe.x, 0, pipe.x + PIPE_WIDTH, 0);
-  pipeGradient.addColorStop(0, '#276b58');
-  pipeGradient.addColorStop(0.45, '#4cae78');
-  pipeGradient.addColorStop(1, '#225b4d');
+  pipeGradient.addColorStop(0, '#23895c');
+  pipeGradient.addColorStop(0.45, '#6bdb86');
+  pipeGradient.addColorStop(1, '#277b52');
   const capHeight = 27;
   ctx.fillStyle = pipeGradient;
   ctx.fillRect(pipe.x, 0, PIPE_WIDTH, pipe.gapTop);
   ctx.fillRect(pipe.x, pipe.gapBottom, PIPE_WIDTH, PLAY_BOTTOM - pipe.gapBottom);
-  ctx.fillStyle = '#5bc788';
+  ctx.fillStyle = '#71df91';
   ctx.fillRect(pipe.x - 5, pipe.gapTop - capHeight, PIPE_WIDTH + 10, capHeight);
   ctx.fillRect(pipe.x - 5, pipe.gapBottom, PIPE_WIDTH + 10, capHeight);
   ctx.fillStyle = 'rgba(255,255,255,.17)';
@@ -812,6 +892,16 @@ function draw() {
 }
 
 function loop(now) {
+  if (gameState.phase === 'armed' && scheduledLaunch && Date.now() >= scheduledLaunch) {
+    gameState.phase = 'running';
+    // The shared wall-clock target lets both frames catch up from the same instant.
+    lastFrame = now - Math.max(0, Date.now() - scheduledLaunch);
+    physicsAccumulator = 0;
+    scheduledLaunch = null;
+    dom.overlay.classList.add('hidden');
+    requestAIDecision();
+  }
+  if (['starting', 'armed'].includes(gameState.phase)) updateUI();
   const delta = Math.max(0, (now - lastFrame) / 1000);
   lastFrame = now;
   physicsAccumulator += delta;
@@ -823,7 +913,28 @@ function loop(now) {
   animationFrame = requestAnimationFrame(loop);
 }
 
-dom.startButton.addEventListener('click', startGame);
+if (RUNNER) {
+  dom.runnerTitle.hidden = false;
+  dom.runnerTitle.textContent = MODEL_LABEL;
+  dom.sentHeading.textContent = 'Inspect model input';
+  dom.responseHeading.textContent = 'Latest selected plan';
+  dom.humanMode.hidden = true;
+  dom.physicsMode.hidden = true;
+}
+
+dom.startButton.addEventListener('click', () => { if (!EMBEDDED) startGame(); });
+window.addEventListener('message', (event) => {
+  if (!EMBEDDED || event.origin !== location.origin || event.source !== window.parent) return;
+  if (event.data?.type === 'comparison-prepare' && typeof event.data.matchId === 'string') {
+    comparisonMatchId = event.data.matchId;
+    resetGame('physics');
+    startGame();
+  }
+  if (event.data?.type === 'comparison-launch' && event.data.matchId === comparisonMatchId
+      && gameState.phase === 'armed' && Number.isFinite(event.data.launchAt)) {
+    scheduledLaunch = event.data.launchAt;
+  }
+});
 dom.humanMode.addEventListener('click', () => setMode('human'));
 dom.physicsMode.addEventListener('click', () => setMode('physics'));
 canvas.addEventListener('pointerdown', flap);
@@ -834,8 +945,9 @@ window.addEventListener('keydown', (event) => {
   }
 });
 
-resetGame();
-loadJevLogs();
+resetGame(RUNNER ? 'physics' : 'human');
+if (CONTROLLER === 'jev' && !EMBEDDED) loadJevLogs();
 connectJevEventStream();
 cancelAnimationFrame(animationFrame);
 animationFrame = requestAnimationFrame(loop);
+if (RUNNER && window.parent !== window) window.parent.postMessage({ type: 'runner-ready', runner: RUNNER }, location.origin);

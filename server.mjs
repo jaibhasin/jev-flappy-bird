@@ -9,6 +9,7 @@ const ROOT = fileURLToPath(new URL('.', import.meta.url));
 loadLocalEnv();
 
 const MODEL = process.env.TYPESAFE_DEFAULT_MODEL || 'jev-latest';
+const OPENAI_MODEL = 'gpt-6-luna';
 const REQUEST_TIMEOUT_MS = Number(process.env.JEV_TIMEOUT_MS) || 2000;
 const MAX_IN_FLIGHT_PER_CLIENT = 12;
 const STREAM_HEARTBEAT_MS = 15_000;
@@ -181,7 +182,7 @@ async function handleJevAction(request, response) {
   }
   if (!Array.isArray(input.plans) || input.plans.length < 1 || input.plans.length > 32
     || input.plans.some((plan) => !plan || typeof plan.id !== 'string' || !Array.isArray(plan.actions_ms)
-      || plan.actions_ms.length > 10 || plan.actions_ms.some((time) => !Number.isInteger(time) || time < 0 || time >= 3200))) {
+      || plan.actions_ms.length > 10 || plan.actions_ms.some((time) => !Number.isInteger(time) || time < 0 || time >= 6400))) {
     sendError(response, 400, 'One to 32 valid candidate plans are required.');
     return;
   }
@@ -208,6 +209,144 @@ async function handleJevAction(request, response) {
     if (remaining === 0) inFlightByClient.delete(clientId);
     else inFlightByClient.set(clientId, remaining);
   });
+}
+
+async function handleOpenAIAction(request, response) {
+  let input;
+  try {
+    input = await readJson(request);
+  } catch {
+    sendError(response, 400, 'Expected a valid JSON request.');
+    return;
+  }
+  if (!input.state || typeof input.state !== 'object'
+    || !Number.isInteger(input.trajectory_version) || input.trajectory_version < 0
+    || !Array.isArray(input.plans) || input.plans.length < 1 || input.plans.length > 32
+    || input.plans.some((plan) => !plan || typeof plan.id !== 'string' || plan.id.length > 40
+      || !Array.isArray(plan.actions_ms) || plan.actions_ms.length > 10
+      || plan.actions_ms.some((time) => !Number.isInteger(time) || time < 0 || time >= 6400))) {
+    sendError(response, 400, 'A valid game state and one to 32 candidate plans are required.');
+    return;
+  }
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey || apiKey === 'your_openai_api_key') {
+    sendError(response, 503, 'OpenAI API key is not configured.');
+    return;
+  }
+
+  const startedAt = Date.now();
+  const planIds = input.plans.map((plan) => plan.id);
+  let upstream;
+  try {
+    upstream = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json', 'Accept-Encoding': 'identity', 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(20_000),
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        reasoning_effort: 'none',
+        max_completion_tokens: 80,
+        messages: [
+          {
+            role: 'system',
+            content: 'Choose the safest Flappy Bird action plan. Select exactly one plan ID from the provided candidates. Compare predicted clearance and flap timing. Return only the requested structured choice.',
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({
+              state: input.state,
+              candidates: input.plans.map(({ id, actions_ms, minimum_clearance, horizon_ms }) => ({
+                id, flap_times_ms: actions_ms, minimum_clearance_px: minimum_clearance, horizon_ms,
+              })),
+            }),
+          },
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'flappy_bird_plan',
+            strict: true,
+            schema: {
+              type: 'object',
+              properties: { plan_id: { type: 'string', enum: planIds } },
+              required: ['plan_id'],
+              additionalProperties: false,
+            },
+          },
+        },
+      }),
+    });
+  } catch (error) {
+    sendError(response, error.name === 'TimeoutError' ? 504 : 502,
+      error.name === 'TimeoutError' ? 'OpenAI request timed out.' : 'Could not reach the OpenAI API.');
+    return;
+  }
+  if (!upstream.ok) {
+    const errorMessage = upstream.status === 401
+      ? 'OpenAI API key was rejected.'
+      : upstream.status === 429
+        ? 'OpenAI API quota or rate limit exceeded (HTTP 429). Check the API project billing and limits.'
+        : `OpenAI request failed (HTTP ${upstream.status}).`;
+    sendError(response, 502, errorMessage);
+    return;
+  }
+
+  let payload;
+  const rawPayload = await upstream.text();
+  try {
+    payload = JSON.parse(rawPayload);
+  } catch {
+    const preview = rawPayload.slice(0, 120).replace(/\s+/g, ' ');
+    sendError(response, 502, `OpenAI returned invalid JSON (${upstream.headers.get('content-type') || 'unknown content type'}, ${rawPayload.length} bytes${preview ? `: ${preview}` : ''}).`);
+    return;
+  }
+  const content = payload.choices?.[0]?.message?.content;
+  let choice;
+  try {
+    choice = JSON.parse(content);
+  } catch {
+    sendError(response, 502, 'OpenAI did not return a valid plan choice.');
+    return;
+  }
+  const selectedPlan = input.plans.find((plan) => plan.id === choice.plan_id);
+  if (!selectedPlan) {
+    sendError(response, 502, 'OpenAI selected an unknown plan.');
+    return;
+  }
+
+  const result = {
+    action: 'plan',
+    plan_id: selectedPlan.id,
+    actions_ms: selectedPlan.actions_ms,
+    horizon_ms: selectedPlan.horizon_ms,
+    trajectory_version: input.trajectory_version,
+    confidence: null,
+    probabilities: {},
+    model: payload.model || OPENAI_MODEL,
+    usage: payload.usage,
+  };
+  const trace = {
+    id: payload.id || randomUUID(),
+    at: new Date(startedAt).toISOString(),
+    duration_ms: Date.now() - startedAt,
+    ok: true,
+    request: {
+      model: OPENAI_MODEL,
+      state: input.state,
+      questions: {
+        plan: {
+          instructions: { question: 'Choose the safest timed flap plan that clears the upcoming pipes.' },
+          criteria: Object.fromEntries(input.plans.map((plan) => [plan.id, {
+            flap_times_ms: plan.actions_ms,
+            predicted_clearance_px: plan.minimum_clearance,
+            planning_horizon_ms: plan.horizon_ms,
+          }])),
+        },
+      },
+    },
+    result,
+  };
+  sendJson(response, 200, { ...result, trace });
 }
 
 async function answerJevDecision(input) {
@@ -295,7 +434,7 @@ async function answerJevDecision(input) {
 function serveStatic(pathname, response) {
   const requestedPath = pathname === '/' ? '/index.html' : pathname;
   const fileName = requestedPath.slice(1);
-  if (!['index.html', 'game.js', 'ai-history.js', 'styles.css'].includes(fileName)) {
+  if (!['index.html', 'bootstrap.js', 'game.js', 'ai-history.js', 'styles.css'].includes(fileName)) {
     sendError(response, 404, 'Not found.');
     return;
   }
@@ -325,8 +464,17 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === 'POST' && url.pathname === '/api/openai/action') {
+    await handleOpenAIAction(request, response);
+    return;
+  }
+
   if (request.method === 'GET' && url.pathname === '/api/health') {
-    sendJson(response, 200, { ok: true, typesafeConfigured: Boolean(process.env.TYPESAFE_API_KEY || process.env.JEV_API_KEY) });
+    sendJson(response, 200, {
+      ok: true,
+      typesafeConfigured: Boolean(process.env.TYPESAFE_API_KEY || process.env.JEV_API_KEY),
+      openaiConfigured: Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'your_openai_api_key'),
+    });
     return;
   }
 
