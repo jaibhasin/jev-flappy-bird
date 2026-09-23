@@ -42,7 +42,7 @@
         <aside class="jev-panel" aria-label="Model request and response">
           <div class="telemetry-heading"><i class="live-dot"></i><span>LIVE TELEMETRY</span></div>
           <section class="action-block">
-            <h2>Current action</h2>
+            <h2>Last applied choice</h2>
             <p class="live-action" id="live-action">READY</p>
             <div class="action-track"><span id="action-fill"></span></div>
             <div class="action-labels"><span>WAIT</span><span>FLAP</span></div>
@@ -51,19 +51,24 @@
             <div><span>Score</span><strong id="stat-score">00</strong></div>
             <div><span>Flight time</span><strong id="stat-time">0.0<span>s</span></strong></div>
             <div><span>Last response</span><strong id="stat-latency">-</strong></div>
-            <div><span>Plans received</span><strong id="stat-plans">0</strong></div>
+            <div><span>Decisions received</span><strong id="stat-decisions">0</strong></div>
           </div>
           <section class="decision-block response-block">
-            <h2 id="response-heading">Latest plan</h2>
+            <h2 id="response-heading">Latest response</h2>
             <p class="decision-action" id="jev-action">Awaiting takeoff</p>
             <div class="probabilities" id="jev-probabilities">No response yet</div>
           </section>
+          <section class="recent-decisions" aria-label="Recent model decisions">
+            <h2>Recent decisions</h2>
+            <ol id="decision-history"></ol>
+            <p id="decision-counts">0 discarded · 0 skipped · 0 errors</p>
+          </section>
           <details class="request-details"><summary id="sent-heading">Model input</summary>
-            <p class="decision-question" id="jev-question">Choose a timed flap plan.</p>
+            <p class="decision-question" id="jev-question">Should the bird FLAP now or WAIT?</p>
             <p class="decision-state" id="jev-state">Waiting for a model request</p>
             <p class="decision-state" id="jev-choices">Same physics. Same course.</p>
           </details>
-          <div class="panel-footnote">MODEL SELECTS · BIRD FLIES</div>
+          <div class="panel-footnote">DIRECT MODEL CONTROL</div>
         </aside>
       </section>
       </section>

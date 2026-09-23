@@ -1,7 +1,7 @@
 # Flappy Bird model race 🐦
 
 Run two independent games side by side: Jev and GPT-6 Luna through the OpenAI API.
-Both games use the same seeded pipes, physics, and candidate-plan generator.
+Both games use a fresh shared course, identical physics, and the same direct FLAP/WAIT decision schedule.
 
 ## Run
 
@@ -15,20 +15,41 @@ Add your TypeSafe and OpenAI API keys to `.env`, then run:
 npm start
 ```
 
-Open <http://localhost:4173> and select **Start both games**.
+Open <http://localhost:4173> and select **Start the matchup**.
 
 Each game runs in its own frame, so its score, state, and model requests are independent.
 The API keys stay on the server.
 
 ## How the models play
 
-The game simulates candidate flap schedules using its fixed physics.
-Each model receives the same projected state and up to 32 safe schedules for a 6.4-second game-time window.
-Jev selects a schedule through TypeSafe, and GPT-6 Luna selects one through the OpenAI Chat Completions API.
-The game applies the selected flaps and requests another schedule for the next window.
+Each model receives the same instructions and observation format: its bird position and velocity, the next three pipes, and the game physics.
+Jev chooses `flap` or `wait` through TypeSafe, and GPT-6 Luna makes the same structured choice through the OpenAI API.
+There are no generated flight plans, safety overrides, or automatic fallback flaps.
 
-Both games keep moving at 120 physics steps per second while waiting for the model.
-If a model fails to answer, the game uses the remaining approved schedule and does not create local fallback flaps.
+Both games wait for their first decision, then launch on a shared countdown.
+During play, physics runs continuously at 120 steps per second, independently of API responses.
+Both controllers ask every 50 ms, with up to twelve requests in flight per player.
+The local server immediately acknowledges each request and delivers its answer over an event stream, avoiding the browser's six-connection request queue.
+Both upstream APIs use persistent HTTP/2-capable connections.
+
+Observations project the bird and pipes forward by an adaptive estimate of response latency, assuming no intervening flap.
+Projection describes the scene only; it never chooses an action or supplies a flap schedule.
+Answers arriving early are held until their projected game time while physics continues.
+Answers from before an intervening flap, older than an applied decision, or from a previous run cannot control the bird.
+Errors produce no input, and the bird continues under gravity.
+
+Before the shared countdown, each model receives two requests to warm its connection; the second supplies its takeoff choice.
+After takeoff there are no waits or pauses for either model.
+Response times, pending requests, superseded responses, and errors remain visible.
+Very high API latency can still exceed the bird's recovery time; no local controller conceals that failure.
+
+The request pipeline follows the approach described in [hosseintoussi/jev-flappy-bird](https://github.com/hosseintoussi/jev-flappy-bird): concurrent decisions, projected observations, and streamed responses.
+
+Each matchup generates a new random seed and sends it to both games.
+The visible course ID identifies that seed.
+Both models see identical observations initially, then each sees its own bird state as their choices diverge.
+The live panels show actual responses, round-trip response times, application status, and error counts.
+Identical choices are possible; no artificial variation is added to model actions.
 
 ## Game physics
 
@@ -37,6 +58,6 @@ If a model fails to answer, the game uses the remaining approved schedule and do
 - Flap velocity: `-330 px/s`.
 - Pipe speed: `178 px/s`.
 - Pipe gap: `178 px`.
-- Pipe pattern: deterministic with `SEED = 1337`.
+- Pipe pattern: deterministic from a fresh shared seed for each matchup.
 
-Run `npm run check` for syntax checks and game logic tests.
+The existing game tests target the previous flight-plan controller and need updating for direct control.

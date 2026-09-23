@@ -10,22 +10,49 @@ loadLocalEnv();
 
 const MODEL = process.env.TYPESAFE_DEFAULT_MODEL || 'jev-latest';
 const OPENAI_MODEL = 'gpt-6-luna';
-const REQUEST_TIMEOUT_MS = Number(process.env.JEV_TIMEOUT_MS) || 2000;
-const MAX_IN_FLIGHT_PER_CLIENT = 12;
-const STREAM_HEARTBEAT_MS = 15_000;
+const REQUEST_TIMEOUT_MS = Number(process.env.JEV_TIMEOUT_MS) || 6000;
 const WARM_EVERY_MS = 20_000;
 const WARM_FOR_MS = 10 * 60_000;
 const WARM_AFTER_IDLE_MS = WARM_EVERY_MS / 2;
 const JEV_LOG_LIMIT = 50;
 const JEV_LOG_PATH = `${ROOT}jev-logs.jsonl`;
-const PLAN_INSTRUCTIONS = {
-  question: 'Choose the safest timed flap plan that clears the upcoming pipes.',
-  guidance: 'Compare the predicted bird path, pipe gaps, action times, and clearances for each candidate. Choose only a plan that keeps the bird alive through its full planning horizon.',
+const ACTION_INSTRUCTIONS = {
+  question: 'Should the bird flap or wait to pass safely through the next gap?',
+  guidance: 'The observation describes the expected scene when your answer arrives, assuming no intervening flap. Choose for that scene. Y increases downward. Flap gives one upward impulse; wait applies no input. Consider position within the gap as well as motion. Stay between ceiling and ground when the next pipe is distant. Only your choice controls the bird.',
 };
+const ACTION_CHOICES = {
+  flap: 'An upward impulse is needed: the bird is below the gap or in its lower half and not already rising toward safety.',
+  wait: 'No upward impulse is needed: the bird is above the gap, in its upper half, or already rising safely through it.',
+};
+const streams = new Map();
+function openStream(response, client) {
+  if (typeof client !== 'string' || !client || client.length > 128) { sendError(response, 400, 'Invalid client.'); return; }
+  streams.get(client)?.end();
+  streams.set(client, response);
+  response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' });
+  response.write(': connected\n\n');
+  const heartbeat = setInterval(() => response.write(': ping\n\n'), 15000);
+  response.on('close', () => { clearInterval(heartbeat); if (streams.get(client) === response) streams.delete(client); });
+}
+async function queueAction(request, response, controller) {
+  let input;
+  try { input = await readJson(request); } catch { sendError(response, 400, 'Invalid JSON.'); return; }
+  if (!input || typeof input.rid !== 'string' || input.rid.length > 100 || !streams.has(input.client)) {
+    sendError(response, 409, 'Connect the answer stream first.'); return;
+  }
+  sendJson(response, 202, { accepted: true });
+  let status = 200;
+  const sink = {
+    writeHead(code) { status = code; },
+    end(body) {
+      const stream = streams.get(input.client);
+      if (stream && !stream.destroyed && !stream.writableEnded) stream.write(`data: ${JSON.stringify({ rid: input.rid, status, body: JSON.parse(body) })}\n\n`);
+    },
+  };
+  await handleAction(request, sink, controller, input);
+}
 
 const PORT = Number(process.env.PORT || 4173);
-const eventStreams = new Map();
-const queuedEvents = new Map();
 const inFlightByClient = new Map();
 const typesafeAgent = new Agent({ allowH2: true, keepAliveTimeout: 60_000 });
 const typesafeFetch = (url, init = {}) => undiciFetch(url, { ...init, dispatcher: typesafeAgent });
@@ -122,312 +149,78 @@ function keepTypeSafeConnectionWarm() {
   warmer.unref();
 }
 
-function publishEvent(clientId, event) {
-  const response = eventStreams.get(clientId);
-  const serialized = `data: ${JSON.stringify(event)}\n\n`;
-  if (response && !response.destroyed && !response.writableEnded) {
-    response.write(serialized);
-    return;
-  }
-
-  const pending = queuedEvents.get(clientId) || [];
-  pending.push(serialized);
-  queuedEvents.set(clientId, pending.slice(-MAX_IN_FLIGHT_PER_CLIENT));
-}
-
-function openEventStream(request, response, clientId) {
-  if (!clientId || clientId.length > 128) {
-    sendError(response, 400, 'A valid stream client ID is required.');
-    return;
-  }
-
-  const previous = eventStreams.get(clientId);
-  if (previous && previous !== response && !previous.destroyed && !previous.writableEnded) previous.end();
-  eventStreams.set(clientId, response);
-  response.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    Connection: 'keep-alive',
-  });
-  response.write(': connected\n\n');
-  const pending = queuedEvents.get(clientId) || [];
-  for (const event of pending) response.write(event);
-  queuedEvents.delete(clientId);
-  response.on('close', () => {
-    if (eventStreams.get(clientId) === response) eventStreams.delete(clientId);
-  });
-}
-
-async function handleJevAction(request, response) {
+async function handleAction(request, response, controller, suppliedInput) {
   let input;
-  try {
-    input = await readJson(request);
-  } catch {
-    sendError(response, 400, 'Expected a valid JSON request.');
+  try { input = suppliedInput ?? await readJson(request); }
+  catch { sendError(response, 400, 'Expected a valid JSON request.'); return; }
+  if (!input || !input.state || typeof input.state !== 'object' || Array.isArray(input.state)
+      || !Number.isInteger(input.sequence) || input.sequence < 0
+      || typeof input.client !== 'string' || !input.client || input.client.length > 128) {
+    sendError(response, 400, 'A game state, client ID, and decision sequence are required.');
     return;
   }
-
-  const clientId = input.client;
-  if (typeof clientId !== 'string' || clientId.length > 128 || !Number.isInteger(input.rid) || input.rid < 1) {
-    sendError(response, 400, 'A valid client ID and request ID are required.');
-    return;
-  }
-  if (!input.state || typeof input.state !== 'object') {
-    sendError(response, 400, 'A structured game state is required.');
-    return;
-  }
-  if (!Number.isInteger(input.trajectory_version) || input.trajectory_version < 0) {
-    sendError(response, 400, 'A valid trajectory version is required.');
-    return;
-  }
-  if (!Array.isArray(input.plans) || input.plans.length < 1 || input.plans.length > 32
-    || input.plans.some((plan) => !plan || typeof plan.id !== 'string' || !Array.isArray(plan.actions_ms)
-      || plan.actions_ms.length > 10 || plan.actions_ms.some((time) => !Number.isInteger(time) || time < 0 || time >= 6400))) {
-    sendError(response, 400, 'One to 32 valid candidate plans are required.');
-    return;
-  }
-  if (!eventStreams.has(clientId)) {
-    sendError(response, 409, 'The answer stream is not connected.');
-    return;
-  }
-  if (!(process.env.TYPESAFE_API_KEY || process.env.JEV_API_KEY)) {
-    sendError(response, 503, 'TypeSafe API key is not configured.');
-    return;
-  }
-  const inFlight = inFlightByClient.get(clientId) || 0;
-  if (inFlight >= MAX_IN_FLIGHT_PER_CLIENT) {
-    sendError(response, 429, 'Too many Jev decisions are already in flight.');
-    return;
-  }
-
-  inFlightByClient.set(clientId, inFlight + 1);
-  lastDecisionAt = performance.now();
-  keepTypeSafeConnectionWarm();
-  sendJson(response, 202, { accepted: true });
-  void answerJevDecision(input).finally(() => {
-    const remaining = (inFlightByClient.get(clientId) || 1) - 1;
-    if (remaining === 0) inFlightByClient.delete(clientId);
-    else inFlightByClient.set(clientId, remaining);
-  });
-}
-
-async function handleOpenAIAction(request, response) {
-  let input;
-  try {
-    input = await readJson(request);
-  } catch {
-    sendError(response, 400, 'Expected a valid JSON request.');
-    return;
-  }
-  if (!input.state || typeof input.state !== 'object'
-    || !Number.isInteger(input.trajectory_version) || input.trajectory_version < 0
-    || !Array.isArray(input.plans) || input.plans.length < 1 || input.plans.length > 32
-    || input.plans.some((plan) => !plan || typeof plan.id !== 'string' || plan.id.length > 40
-      || !Array.isArray(plan.actions_ms) || plan.actions_ms.length > 10
-      || plan.actions_ms.some((time) => !Number.isInteger(time) || time < 0 || time >= 6400))) {
-    sendError(response, 400, 'A valid game state and one to 32 candidate plans are required.');
-    return;
-  }
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey || apiKey === 'your_openai_api_key') {
-    sendError(response, 503, 'OpenAI API key is not configured.');
-    return;
-  }
-
-  const startedAt = Date.now();
-  const planIds = input.plans.map((plan) => plan.id);
-  let upstream;
-  try {
-    upstream = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json', 'Accept-Encoding': 'identity', 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(20_000),
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        reasoning_effort: 'none',
-        max_completion_tokens: 80,
-        messages: [
-          {
-            role: 'system',
-            content: 'Choose the safest Flappy Bird action plan. Select exactly one plan ID from the provided candidates. Compare predicted clearance and flap timing. Return only the requested structured choice.',
-          },
-          {
-            role: 'user',
-            content: JSON.stringify({
-              state: input.state,
-              candidates: input.plans.map(({ id, actions_ms, minimum_clearance, horizon_ms }) => ({
-                id, flap_times_ms: actions_ms, minimum_clearance_px: minimum_clearance, horizon_ms,
-              })),
-            }),
-          },
-        ],
-        response_format: {
-          type: 'json_schema',
-          json_schema: {
-            name: 'flappy_bird_plan',
-            strict: true,
-            schema: {
-              type: 'object',
-              properties: { plan_id: { type: 'string', enum: planIds } },
-              required: ['plan_id'],
-              additionalProperties: false,
-            },
-          },
-        },
-      }),
-    });
-  } catch (error) {
-    sendError(response, error.name === 'TimeoutError' ? 504 : 502,
-      error.name === 'TimeoutError' ? 'OpenAI request timed out.' : 'Could not reach the OpenAI API.');
-    return;
-  }
-  if (!upstream.ok) {
-    const errorMessage = upstream.status === 401
-      ? 'OpenAI API key was rejected.'
-      : upstream.status === 429
-        ? 'OpenAI API quota or rate limit exceeded (HTTP 429). Check the API project billing and limits.'
-        : `OpenAI request failed (HTTP ${upstream.status}).`;
-    sendError(response, 502, errorMessage);
-    return;
-  }
-
-  let payload;
-  const rawPayload = await upstream.text();
-  try {
-    payload = JSON.parse(rawPayload);
-  } catch {
-    const preview = rawPayload.slice(0, 120).replace(/\s+/g, ' ');
-    sendError(response, 502, `OpenAI returned invalid JSON (${upstream.headers.get('content-type') || 'unknown content type'}, ${rawPayload.length} bytes${preview ? `: ${preview}` : ''}).`);
-    return;
-  }
-  const content = payload.choices?.[0]?.message?.content;
-  let choice;
-  try {
-    choice = JSON.parse(content);
-  } catch {
-    sendError(response, 502, 'OpenAI did not return a valid plan choice.');
-    return;
-  }
-  const selectedPlan = input.plans.find((plan) => plan.id === choice.plan_id);
-  if (!selectedPlan) {
-    sendError(response, 502, 'OpenAI selected an unknown plan.');
-    return;
-  }
-
-  const result = {
-    action: 'plan',
-    plan_id: selectedPlan.id,
-    actions_ms: selectedPlan.actions_ms,
-    horizon_ms: selectedPlan.horizon_ms,
-    trajectory_version: input.trajectory_version,
-    confidence: null,
-    probabilities: {},
-    model: payload.model || OPENAI_MODEL,
-    usage: payload.usage,
-  };
-  const trace = {
-    id: payload.id || randomUUID(),
-    at: new Date(startedAt).toISOString(),
-    duration_ms: Date.now() - startedAt,
-    ok: true,
-    request: {
-      model: OPENAI_MODEL,
-      state: input.state,
-      questions: {
-        plan: {
-          instructions: { question: 'Choose the safest timed flap plan that clears the upcoming pipes.' },
-          criteria: Object.fromEntries(input.plans.map((plan) => [plan.id, {
-            flap_times_ms: plan.actions_ms,
-            predicted_clearance_px: plan.minimum_clearance,
-            planning_horizon_ms: plan.horizon_ms,
-          }])),
-        },
-      },
-    },
-    result,
-  };
-  sendJson(response, 200, { ...result, trace });
-}
-
-async function answerJevDecision(input) {
-  const traceId = randomUUID();
+  const clientKey = `${controller}:${input.client}`;
+  const active = inFlightByClient.get(clientKey) || 0;
+  if (active >= 12) { sendError(response, 429, 'Too many pending decisions.'); return; }
+  inFlightByClient.set(clientKey, active + 1);
   const startedAt = Date.now();
   const modelRequest = {
+    model: controller === 'jev' ? MODEL : OPENAI_MODEL,
     state: input.state,
-    model: MODEL,
-    questions: {
-      plan: {
-        type: 'choice',
-        instructions: PLAN_INSTRUCTIONS,
-        criteria: Object.fromEntries(input.plans.map((plan) => [plan.id, {
-          flap_times_ms: plan.actions_ms,
-          predicted_clearance_px: plan.minimum_clearance,
-          planning_horizon_ms: plan.horizon_ms,
-        }])),
-      },
-    },
+    questions: { action: { type: 'choice', instructions: ACTION_INSTRUCTIONS, criteria: ACTION_CHOICES } },
   };
-
   try {
-    const { data, response, requestId } = await getTypeSafeClient()
-      .systemOne({
+    let result;
+    if (controller === 'jev') {
+      lastDecisionAt = performance.now();
+      keepTypeSafeConnectionWarm();
+      const data = await getTypeSafeClient().systemOne({
         state: input.state,
-        questions: { plan: choice(PLAN_INSTRUCTIONS, modelRequest.questions.plan.criteria) },
-      })
-      .withResponse();
-    const answer = data.answers?.plan;
-    const selectedPlan = input.plans.find((plan) => plan.id === answer?.choice);
-    if (!answer || !selectedPlan) {
-      throw new Error('TypeSafe returned an invalid plan.');
+        questions: { action: choice(ACTION_INSTRUCTIONS, ACTION_CHOICES) },
+      });
+      const answer = data.answers?.action;
+      result = { action: answer?.choice, confidence: answer?.confidence ?? null,
+        probabilities: answer?.probabilities ?? {}, model: data.model, usage: data.usage };
+    } else {
+      const apiKey = process.env.OPENAI_API_KEY;
+      if (!apiKey || apiKey === 'your_openai_api_key') throw new Error('OpenAI API key is not configured.');
+      const upstream = await typesafeFetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json', 'Accept-Encoding': 'identity', 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        body: JSON.stringify({
+          model: OPENAI_MODEL, reasoning_effort: 'none', max_completion_tokens: 32,
+          messages: [
+            { role: 'system', content: JSON.stringify({ instructions: ACTION_INSTRUCTIONS, criteria: ACTION_CHOICES }) },
+            { role: 'user', content: JSON.stringify({ state: input.state }) },
+          ],
+          response_format: { type: 'json_schema', json_schema: {
+            name: 'flappy_bird_action', strict: true,
+            schema: { type: 'object', properties: { action: { type: 'string', enum: ['flap', 'wait'] } },
+              required: ['action'], additionalProperties: false },
+          } },
+        }),
+      });
+      if (!upstream.ok) throw new Error(`OpenAI request failed (HTTP ${upstream.status}).`);
+      const payload = await upstream.json();
+      const answer = JSON.parse(payload.choices?.[0]?.message?.content || '{}');
+      result = { action: answer.action, confidence: null, probabilities: {}, model: payload.model, usage: payload.usage };
     }
-
-    const result = {
-      action: 'plan',
-      plan_id: selectedPlan.id,
-      actions_ms: selectedPlan.actions_ms,
-      horizon_ms: selectedPlan.horizon_ms,
-      trajectory_version: input.trajectory_version,
-      confidence: answer.confidence ?? null,
-      probabilities: answer.probabilities ?? {},
-      usage: data.usage,
-      model: data.model,
-    };
-    const trace = {
-      id: traceId,
-      at: new Date(startedAt).toISOString(),
-      duration_ms: Date.now() - startedAt,
-      ok: true,
-      request: modelRequest,
-      response: {
-        model: data.model,
-        answers: data.answers,
-        usage: data.usage,
-        request_id: requestId,
-        jev_ms: Number(response.headers.get('x-envoy-upstream-service-time')) || null,
-      },
-      result,
-    };
-    saveJevLog(trace);
-    publishEvent(input.client, { rid: input.rid, status: 200, body: { ...result, trace } });
+    if (!['flap', 'wait'].includes(result.action)) throw new Error('Model returned an invalid action.');
+    result.sequence = input.sequence;
+    const trace = { id: randomUUID(), at: new Date(startedAt).toISOString(),
+      duration_ms: Date.now() - startedAt, ok: true, request: modelRequest, result };
+    sendJson(response, 200, { ...result, trace });
+    if (controller === 'jev') { try { saveJevLog(trace); } catch {} }
   } catch (error) {
-    const message = error instanceof APITimeoutError
-      ? 'TypeSafe request timed out.'
-      : error instanceof APIError || error instanceof APIConnectionError
-        ? 'Could not get a decision from TypeSafe.'
-        : error.message === 'TypeSafe API key is not configured.'
-          ? error.message
-          : 'Could not get a decision from TypeSafe.';
-    console.error(message, error.message);
-    const trace = {
-      id: traceId,
-      at: new Date(startedAt).toISOString(),
-      duration_ms: Date.now() - startedAt,
-      ok: false,
-      request: modelRequest,
-      error: message,
-    };
-    saveJevLog(trace);
-    publishEvent(input.client, { rid: input.rid, status: 502, body: { error: message, trace } });
+    const message = error instanceof APITimeoutError || error.name === 'TimeoutError'
+      ? 'Model request timed out.' : error instanceof APIError || error instanceof APIConnectionError
+        ? 'Could not get a decision from TypeSafe.' : error.message;
+    sendError(response, 502, message);
+  } finally {
+    const remaining = (inFlightByClient.get(clientKey) || 1) - 1;
+    if (remaining > 0) inFlightByClient.set(clientKey, remaining);
+    else inFlightByClient.delete(clientKey);
   }
 }
 
@@ -454,18 +247,18 @@ function serveStatic(pathname, response) {
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
 
-  if (request.method === 'GET' && url.pathname === '/api/jev/stream') {
-    openEventStream(request, response, url.searchParams.get('client'));
+  if (request.method === 'GET' && url.pathname === '/api/decisions/stream') {
+    openStream(response, url.searchParams.get('client'));
     return;
   }
 
   if (request.method === 'POST' && url.pathname === '/api/jev/action') {
-    await handleJevAction(request, response);
+    await queueAction(request, response, 'jev');
     return;
   }
 
   if (request.method === 'POST' && url.pathname === '/api/openai/action') {
-    await handleOpenAIAction(request, response);
+    await queueAction(request, response, 'openai');
     return;
   }
 
@@ -497,17 +290,9 @@ const server = createServer(async (request, response) => {
   sendError(response, 405, 'Method not allowed.');
 });
 
-const heartbeat = setInterval(() => {
-  for (const response of eventStreams.values()) {
-    if (!response.destroyed && !response.writableEnded) response.write(': ping\n\n');
-  }
-}, STREAM_HEARTBEAT_MS);
-heartbeat.unref();
-
 keepTypeSafeConnectionWarm();
 
 server.on('close', () => {
-  clearInterval(heartbeat);
   if (warmer) clearInterval(warmer);
   void typesafeAgent.close();
 });
