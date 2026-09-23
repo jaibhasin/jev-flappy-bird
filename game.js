@@ -348,35 +348,35 @@ function getGameSnapshot(world = gameState) {
   };
 }
 
-function getProjectedState(seconds, world = gameState) {
-  const current = getGameSnapshot(world);
-  const pipe = getNextPipeFor(world);
-  const projectedY = world.bird.y + world.bird.velocity * seconds + 0.5 * GRAVITY * seconds ** 2;
-  const projectedVelocity = world.bird.velocity + GRAVITY * seconds;
-  const projectedPipeX = pipe ? pipe.x - PIPE_SPEED * seconds : null;
-  const inPipeX = pipe && BIRD_X + COLLISION_RADIUS > projectedPipeX && BIRD_X - COLLISION_RADIUS < projectedPipeX + PIPE_WIDTH;
-  const hitsPipe = inPipeX && (projectedY - COLLISION_RADIUS < pipe.gapTop || projectedY + COLLISION_RADIUS > pipe.gapBottom);
-  const crash = hitsPipe ? (projectedY < pipe.gapTop ? 'upper_pipe' : 'lower_pipe') : projectedY - COLLISION_RADIUS < 0 ? 'ceiling' : projectedY + COLLISION_RADIUS > PLAY_BOTTOM ? 'ground' : null;
+export function getProjectedState(seconds, world = gameState) {
+  const shift = PIPE_SPEED * seconds;
+  const pipeIndex = world.pipes.findIndex((candidate) => candidate.x - shift + PIPE_WIDTH >= BIRD_X - BIRD_RADIUS);
+  const pipe = world.pipes[pipeIndex];
+  let projectedY = world.bird.y;
+  let projectedVelocity = world.bird.velocity;
+  for (let elapsed = 0; elapsed < seconds;) {
+    const step = Math.min(1 / 120, seconds - elapsed);
+    projectedVelocity += GRAVITY * step;
+    projectedY += projectedVelocity * step;
+    elapsed += step;
+  }
+  const projectedPipeX = pipe ? pipe.x - shift : null;
+  const clearanceAbove = pipe ? Math.round(projectedY - COLLISION_RADIUS - pipe.gapTop) : null;
+  const clearanceBelow = pipe ? Math.round(pipe.gapBottom - projectedY - COLLISION_RADIUS) : null;
 
   return {
     after_ms: Math.round(seconds * 1000),
     bird_y: Math.round(projectedY),
     bird_velocity: Math.round(projectedVelocity),
-    pipe_id: current.pipe_id,
+    pipe_id: pipeIndex,
     pipe_distance: projectedPipeX === null ? null : Math.max(0, Math.round(projectedPipeX - BIRD_X)),
-    gap_top: current.gap_top,
-    gap_bottom: current.gap_bottom,
+    gap_top: pipe ? Math.round(pipe.gapTop) : null,
+    gap_bottom: pipe ? Math.round(pipe.gapBottom) : null,
     gap_offset: pipe ? Math.round(projectedY - (pipe.gapTop + pipe.gapBottom) / 2) : 0,
-    predicted_crash: crash,
-  };
-}
-
-function cloneWorld(world = gameState) {
-  return {
-    score: world.score,
-    bird: { ...world.bird },
-    pipes: world.pipes.map((pipe) => ({ ...pipe })),
-    flash: world.flash,
+    clearance_above: clearanceAbove,
+    clearance_below: clearanceBelow,
+    position: !pipe ? null : clearanceAbove < 0 ? 'above the gap' : clearanceBelow < 0 ? 'below the gap' : clearanceAbove < clearanceBelow ? 'inside the gap, upper half' : 'inside the gap, lower half',
+    motion: projectedVelocity < -60 ? 'rising' : projectedVelocity > 250 ? 'falling fast' : projectedVelocity > 60 ? 'falling' : 'level',
   };
 }
 
@@ -534,9 +534,7 @@ async function requestAIDecision() {
   const trajectoryVersion = gameState.ai.trajectoryVersion;
   const startedAt = performance.now();
   const latencyEstimate = aiState.latencyEstimate;
-  const planningWorld = cloneWorld(gameState);
-  const latencyProjection = getProjectedState(gameState.phase === 'starting' ? 0 : latencyEstimate / 1000, planningWorld);
-  advanceWorld(planningWorld, latencyEstimate / 1000);
+  const latencyProjection = getProjectedState(gameState.phase === 'starting' ? 0 : latencyEstimate / 1000);
   const state = getAIState(latencyProjection);
   const requestBody = {
     state,

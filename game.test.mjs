@@ -60,7 +60,7 @@ test('Jev waits for its first answer before the bird starts falling', async () =
   globalThis.setTimeout = () => 1;
   globalThis.clearTimeout = () => {};
 
-  await import('./game.js');
+  const { getProjectedState } = await import('./game.js');
   elements.get('#physics-mode').click();
   elements.get('#start-button').click();
   assert.equal(elements.get('#run-status').textContent, 'Waiting for Jev');
@@ -92,4 +92,19 @@ test('Jev waits for its first answer before the bird starts falling', async () =
   intervalTick();
   assert.equal(requests.length, 3);
   assert.ok(requests[1].state.pipe_distance - requests[2].state.pipe_distance >= 6);
+
+  const world = {
+    bird: { y: 300, velocity: 0 },
+    pipes: [
+      { x: 100, gapTop: 100, gapBottom: 278 },
+      { x: 355, gapTop: 260, gapBottom: 438 },
+    ],
+  };
+  assert.equal(getProjectedState(0, world).pipe_id, 0);
+  const projected = getProjectedState(0.6, world);
+  assert.equal(projected.pipe_id, 1);
+  assert.equal(projected.gap_top, 260);
+  assert.equal(projected.pipe_distance, 126);
+  assert.equal(projected.clearance_above, 201);
+  assert.equal(projected.position, 'below the gap');
 });
