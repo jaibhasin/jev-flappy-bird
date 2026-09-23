@@ -13,17 +13,19 @@ function createElement() {
     },
     addEventListener: (type, listener) => listeners.set(type, listener),
     click: () => listeners.get('click')?.(),
+    pointerdown: () => listeners.get('pointerdown')?.(),
     innerHTML: '',
     textContent: '',
   };
 }
 
-test('Jev waits for its first answer before the bird starts falling', async () => {
+test('Jev plans run at fixed speed across delayed answers and never use a fallback', async () => {
   let now = 0;
   let nextFrame;
   let intervalTick;
   let stream;
   const requests = [];
+  const sentAt = new Map();
   const selectors = [
     '#score', '#seed-value', '#run-status', '#start-overlay', '#overlay-kicker',
     '#overlay-title', '#overlay-copy', '#start-button', '#human-mode',
@@ -51,6 +53,7 @@ test('Jev waits for its first answer before the bird starts falling', async () =
   globalThis.fetch = async (url, options) => {
     if (url === '/api/jev/logs') return { ok: true, json: async () => ({ logs: [] }) };
     requests.push(JSON.parse(options.body));
+    sentAt.set(requests.at(-1).rid, now);
     return { status: 202 };
   };
   globalThis.requestAnimationFrame = (callback) => { nextFrame = callback; return 1; };
@@ -88,7 +91,7 @@ test('Jev waits for its first answer before the bird starts falling', async () =
   assert.equal(elements.get('#run-status').textContent, 'Playing');
   assert.equal(requests.length, 2);
   assert.equal(requests[1].trajectory_version, 1);
-  assert.ok(requests[1].state.decision_at_game_ms >= requests[1].state.committed_plan_end_ms + 600);
+  assert.equal(requests[1].state.decision_at_game_ms, requests[1].state.committed_plan_end_ms);
   assert.ok(requests[1].state.candidate_plans.length > 0);
 
   now = 1234;
@@ -110,4 +113,52 @@ test('Jev waits for its first answer before the bird starts falling', async () =
   assert.equal(projected.pipe_distance, 126);
   assert.equal(projected.clearance_above, 201);
   assert.equal(projected.position, 'below the gap');
+
+  // Drive an entire seeded course using varied valid mocked Jev choices,
+  // network delays, and frame gaps. The browser test separately uses real Jev.
+  let answered = 1;
+  let frames = 0;
+  const delays = [80, 1400, 700, 250, 1100];
+  const frameTimes = [8, 17, 50, 11, 83];
+  async function answer(request, choiceIndex = 0) {
+    stream.onmessage({ data: JSON.stringify({
+      rid: request.rid, status: 200,
+      body: { action: 'plan', plan_id: request.plans[choiceIndex].id,
+        trajectory_version: request.trajectory_version, confidence: 1 },
+    }) });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  while (now < 65000 && elements.get('#run-status').textContent === 'Playing') {
+    now += frameTimes[frames++ % frameTimes.length];
+    nextFrame(now);
+    intervalTick();
+    const request = requests[answered];
+    if (request && now - sentAt.get(request.rid) >= delays[answered % delays.length]) {
+      assert.equal(request.state.decision_at_game_ms, request.state.committed_plan_end_ms);
+      await answer(request, answered % request.plans.length);
+      answered += 1;
+    }
+  }
+  assert.equal(elements.get('#score').textContent, 40);
+  assert.equal(elements.get('#overlay-title').textContent, 'Run complete at 40');
+  // Last pipe clears at 59.27 seconds of game time, regardless of response RTT.
+  assert.ok(now - 1200 > 59000 && now - 1200 < 59500, `course duration: ${now - 1200}ms`);
+
+  // On a new run, accept only the first plan, then drop all later answers.
+  // Already selected actions finish, physics continues, and the bird crashes.
+  elements.get('#start-button').click();
+  const first = requests.at(-1);
+  await answer(first);
+  const initial = getProjectedState(0);
+  canvas.pointerdown();
+  assert.deepEqual(getProjectedState(0), initial);
+  const runStartedAt = now;
+  while (now - runStartedAt < 10000 && elements.get('#run-status').textContent === 'Playing') {
+    now += 17;
+    nextFrame(now);
+    intervalTick();
+  }
+  assert.equal(elements.get('#run-status').textContent, 'Game over');
+  assert.ok(now - runStartedAt < 6000, 'No automatic flaps or latency freeze after the approved plan ends');
+
 });

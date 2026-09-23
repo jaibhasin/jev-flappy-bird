@@ -18,7 +18,6 @@ const COLLISION_RADIUS = 12;
 const GRAVITY = 950;
 const FLAP_VELOCITY = -330;
 const AI_REQUEST_INTERVAL_MS = 50;
-const INITIAL_LATENCY_ESTIMATE_MS = 280;
 const PLAN_HORIZON_MS = 3200;
 const MAX_PLAN_OPTIONS = 32;
 const JEV_REQUEST_TIMEOUT_MS = 6000;
@@ -46,6 +45,7 @@ const dom = {
 let gameState;
 let lastFrame = performance.now();
 let animationFrame;
+let physicsAccumulator = 0;
 let aiRunToken = 0;
 let jevLogs = [];
 const jevClientId = crypto.randomUUID();
@@ -91,11 +91,8 @@ function createAIState() {
     runId: null,
     pendingMove: null,
     trajectoryVersion: 0,
-    latencyEstimate: INITIAL_LATENCY_ESTIMATE_MS,
-    latencySamples: [],
     gameTimeMs: 0,
     planEndMs: 0,
-    nextDecisionAtMs: null,
     plannedActions: [],
     runToken: ++aiRunToken,
   };
@@ -123,6 +120,8 @@ function startGame() {
   if (gameState.phase === 'running' || gameState.phase === 'starting') return;
   if (gameState.phase === 'gameover' || gameState.phase === 'aierror') resetGame();
   gameState.phase = gameState.mode === 'physics' ? 'starting' : 'running';
+  lastFrame = performance.now();
+  physicsAccumulator = 0;
   dom.overlay.classList.add('hidden');
   dom.runStatus.textContent = 'Flying';
   if (gameState.mode === 'physics') {
@@ -253,6 +252,7 @@ function endGame(reason = 'unknown') {
 }
 
 function completeGame() {
+  if (gameState.ai.requestTimer) clearInterval(gameState.ai.requestTimer);
   finishPendingAIMove();
   gameState.phase = 'gameover';
   dom.runStatus.textContent = 'Complete';
@@ -262,18 +262,6 @@ function completeGame() {
   dom.startButton.innerHTML = gameState.mode === 'physics' ? 'Run it again <span>↗</span>' : 'Play again <span>↗</span>';
   dom.overlay.classList.remove('hidden');
   updateUI();
-}
-
-function pauseForAIError(message) {
-  if (gameState.ai.requestTimer) clearInterval(gameState.ai.requestTimer);
-  gameState.phase = 'aierror';
-  gameState.ai.error = message;
-  dom.runStatus.textContent = 'AI paused';
-  dom.overlayKicker.textContent = 'With physics';
-  dom.overlayTitle.textContent = 'AI CONNECTION PAUSED';
-  dom.overlayCopy.textContent = message;
-  dom.startButton.innerHTML = 'Try AI again <span>↗</span>';
-  dom.overlay.classList.remove('hidden');
 }
 
 function addJevLog(trace) {
@@ -413,32 +401,6 @@ function copyWorld(world) {
   };
 }
 
-function simulateWorld(world, actionTimesMs, durationMs) {
-  const simulation = copyWorld(world);
-  const actions = [...actionTimesMs].sort((a, b) => a - b);
-  let nextAction = 0;
-  let elapsedMs = 0;
-  let minimumClearance = Number.POSITIVE_INFINITY;
-  const stepMs = 1000 / 120;
-
-  while (elapsedMs < durationMs) {
-    while (actions[nextAction] !== undefined && actions[nextAction] <= elapsedMs + 0.001) {
-      simulation.bird.velocity = FLAP_VELOCITY;
-      nextAction += 1;
-    }
-    const step = Math.min(stepMs, durationMs - elapsedMs) / 1000;
-    const result = advanceWorld(simulation, step);
-    if (result.collision) return { safe: false, minimumClearance };
-    elapsedMs += step * 1000;
-
-    const pipe = getNextPipeFor(simulation);
-    if (pipe && BIRD_X + COLLISION_RADIUS > pipe.x && BIRD_X - COLLISION_RADIUS < pipe.x + PIPE_WIDTH) {
-      minimumClearance = Math.min(minimumClearance, simulation.bird.y - COLLISION_RADIUS - pipe.gapTop, pipe.gapBottom - simulation.bird.y - COLLISION_RADIUS);
-    }
-  }
-  return { safe: true, minimumClearance: Number.isFinite(minimumClearance) ? Math.round(minimumClearance) : 999 };
-}
-
 function projectCommittedPlan(targetGameTimeMs) {
   const world = copyWorld(gameState);
   let cursorMs = gameState.ai.gameTimeMs;
@@ -446,52 +408,69 @@ function projectCommittedPlan(targetGameTimeMs) {
   for (const action of pending) {
     if (action.atMs > targetGameTimeMs) break;
     const result = advanceWorld(world, Math.max(0, action.atMs - cursorMs) / 1000);
-    if (result.collision || result.complete) return null;
+    if (result.collision) return null;
+    if (result.complete) return { ...world, complete: true };
     cursorMs = action.atMs;
     world.bird.velocity = FLAP_VELOCITY;
   }
   const result = advanceWorld(world, Math.max(0, targetGameTimeMs - cursorMs) / 1000);
-  if (result.collision || result.complete) return null;
+  if (result.collision) return null;
+  if (result.complete) return { ...world, complete: true };
   return world;
 }
 
-function buildCandidatePlans(world, latencyBudgetMs) {
-  const schedules = [[]];
-  const seenSchedules = new Set(['']);
-  for (let intervalMs = 400; intervalMs <= 1000; intervalMs += 50) {
-    for (let phaseMs = 0; phaseMs < intervalMs; phaseMs += 100) {
-      const actionsMs = [];
-      for (let actionAtMs = phaseMs; actionAtMs < PLAN_HORIZON_MS; actionAtMs += intervalMs) actionsMs.push(actionAtMs);
-      const key = actionsMs.join(',');
-      if (!seenSchedules.has(key)) {
-        schedules.push(actionsMs);
-        seenSchedules.add(key);
+export function buildCandidatePlans(world) {
+  // Explore variable timings, including a continuation beyond the committed
+  // horizon. Only Jev may select one of these schedules for execution.
+  const stepMs = 100;
+  const lookaheadMs = PLAN_HORIZON_MS + 1200;
+  const nearby = copyWorld(world);
+  nearby.pipes = nearby.pipes.filter((pipe) => pipe.x + PIPE_WIDTH >= BIRD_X - BIRD_RADIUS
+    && pipe.x < BIRD_X + PIPE_SPEED * lookaheadMs / 1000 + PIPE_WIDTH);
+  let frontier = [{ world: nearby, actions: [], clearance: Infinity }];
+  for (let atMs = 0; atMs < lookaheadMs; atMs += stepMs) {
+    const cells = new Map();
+    for (const node of frontier) {
+      for (const flapNow of [false, true]) {
+        if (flapNow && atMs - (node.actions.at(-1) ?? -1000) < 200) continue;
+        const next = copyWorld(node.world);
+        if (flapNow) next.bird.velocity = FLAP_VELOCITY;
+        let clearance = node.clearance;
+        let safe = true;
+        for (let tick = 0; tick < 12; tick += 1) {
+          const result = advanceWorld(next, 1 / 120);
+          if (result.collision) { safe = false; break; }
+          clearance = Math.min(clearance, next.bird.y - COLLISION_RADIUS, PLAY_BOTTOM - next.bird.y - COLLISION_RADIUS);
+          const pipe = getNextPipeFor(next);
+          if (pipe && BIRD_X + COLLISION_RADIUS > pipe.x && BIRD_X - COLLISION_RADIUS < pipe.x + PIPE_WIDTH) {
+            clearance = Math.min(clearance, next.bird.y - COLLISION_RADIUS - pipe.gapTop, pipe.gapBottom - next.bird.y - COLLISION_RADIUS);
+          }
+        }
+        if (!safe || clearance < 6) continue;
+        const actions = flapNow ? [...node.actions, atMs] : node.actions;
+        if (actions.filter((time) => time < PLAN_HORIZON_MS).length > 10) continue;
+        const key = `${Math.round(next.bird.y / 6)}:${Math.round(next.bird.velocity / 40)}`;
+        if (!cells.has(key) || cells.get(key).clearance < clearance) {
+          cells.set(key, { world: next, actions, clearance });
+        }
       }
     }
+    frontier = [...cells.values()];
+    if (!frontier.length) return [];
   }
-
-  const candidates = schedules.map((actionsMs) => {
-    const result = simulateWorld(world, actionsMs, PLAN_HORIZON_MS + latencyBudgetMs);
-    return result.safe ? { actions_ms: actionsMs, minimum_clearance: result.minimumClearance, horizon_ms: PLAN_HORIZON_MS + latencyBudgetMs } : null;
-  }).filter(Boolean);
-  candidates.sort((a, b) => b.minimum_clearance - a.minimum_clearance);
-
-  const selected = [];
-  const seen = new Set();
-  for (let index = 0; index < candidates.length && selected.length < MAX_PLAN_OPTIONS; index += 1) {
-    const candidate = candidates[Math.floor(index * candidates.length / MAX_PLAN_OPTIONS)];
-    const key = candidate.actions_ms.join(',');
-    if (seen.has(key)) continue;
-    seen.add(key);
-    selected.push({ id: `plan_${selected.length + 1}`, ...candidate });
+  const candidates = new Map();
+  for (const node of frontier.sort((a, b) => b.clearance - a.clearance)) {
+    const actions = node.actions.filter((time) => time < PLAN_HORIZON_MS);
+    const key = actions.join(',');
+    if (!candidates.has(key)) candidates.set(key, {
+      id: `plan_${candidates.size + 1}`,
+      actions_ms: actions,
+      minimum_clearance: Math.floor(node.clearance),
+      horizon_ms: PLAN_HORIZON_MS,
+    });
+    if (candidates.size === MAX_PLAN_OPTIONS) break;
   }
-  return selected;
-}
-
-function getLatencyBudget() {
-  const samples = [...gameState.ai.latencySamples].sort((a, b) => a - b);
-  const p90 = samples.length ? samples[Math.min(samples.length - 1, Math.ceil(samples.length * 0.9) - 1)] : INITIAL_LATENCY_ESTIMATE_MS;
-  return Math.min(1800, Math.max(600, p90 + 150, gameState.ai.latencyEstimate * 1.5));
+  return [...candidates.values()];
 }
 
 function recordAIStep(action, before, after, stepResult, requestLatency) {
@@ -543,7 +522,7 @@ function applyAIDecision(action, requestLatency) {
 function advanceAIPhysics(delta) {
   let remaining = delta;
   const actions = gameState.ai.plannedActions.sort((a, b) => a.atMs - b.atMs);
-  while (actions.length && actions[0].atMs <= gameState.ai.gameTimeMs + remaining) {
+  while (actions.length && actions[0].atMs <= gameState.ai.gameTimeMs + remaining * 1000 + 0.001) {
     const action = actions.shift();
     const untilAction = Math.max(0, (action.atMs - gameState.ai.gameTimeMs) / 1000);
     if (untilAction > 0) {
@@ -633,18 +612,25 @@ async function requestAIDecision() {
   const runToken = aiState.runToken;
   const trajectoryVersion = aiState.trajectoryVersion;
   const startedAt = performance.now();
-  const latencyBudgetMs = getLatencyBudget();
+  // Keep one plan ahead, with adjacent boundaries independent of network RTT.
+  if (gameState.phase === 'running' && aiState.planEndMs - aiState.gameTimeMs > PLAN_HORIZON_MS) return;
   const targetGameTimeMs = gameState.phase === 'starting'
     ? aiState.gameTimeMs
-    : Math.max(aiState.nextDecisionAtMs ?? (aiState.planEndMs + latencyBudgetMs), aiState.gameTimeMs + latencyBudgetMs);
+    : aiState.planEndMs;
+  if (targetGameTimeMs < aiState.gameTimeMs - 0.001) return;
   const projectedWorld = projectCommittedPlan(targetGameTimeMs);
   if (!projectedWorld) {
-    pauseForAIError('The committed plan does not safely reach the next Jev decision point.');
+    aiState.error = 'The committed plan cannot reach the next decision point.';
+    aiState.offline = true;
+    aiState.retryAt = performance.now() + 500;
     return;
   }
-  const plans = buildCandidatePlans(projectedWorld, latencyBudgetMs);
+  if (projectedWorld.complete) return;
+  const plans = buildCandidatePlans(projectedWorld);
   if (!plans.length) {
-    pauseForAIError('No collision-free Jev plan options were available at the next decision point.');
+    aiState.error = 'No safe plan candidates are available.';
+    aiState.offline = true;
+    aiState.retryAt = performance.now() + 500;
     return;
   }
   const state = {
@@ -679,18 +665,18 @@ async function requestAIDecision() {
     gameState.ai.confidence = payload.confidence;
     const requestLatency = performance.now() - startedAt;
     gameState.ai.latency = Math.round(requestLatency);
-    aiState.latencyEstimate = Math.round(aiState.latencyEstimate * 0.8 + Math.min(requestLatency, 1800) * 0.2);
-    aiState.latencySamples.push(requestLatency);
-    aiState.latencySamples = aiState.latencySamples.slice(-12);
     gameState.ai.error = null;
     gameState.ai.offline = false;
     gameState.ai.retryAt = 0;
     if (targetGameTimeMs < aiState.gameTimeMs) throw new Error('Jev plan arrived after its projected decision time.');
     aiState.plannedActions.push(...selectedPlan.actions_ms.map((offsetMs) => ({ atMs: targetGameTimeMs + offsetMs, latency: requestLatency })));
     aiState.planEndMs = targetGameTimeMs + PLAN_HORIZON_MS;
-    aiState.nextDecisionAtMs = aiState.planEndMs + latencyBudgetMs;
     aiState.trajectoryVersion += 1;
-    if (gameState.phase === 'starting') gameState.phase = 'running';
+    if (gameState.phase === 'starting') {
+      gameState.phase = 'running';
+      lastFrame = performance.now();
+      physicsAccumulator = 0;
+    }
     requestAgain = true;
   } catch (error) {
     if (!traceRecorded) addJevLog(makeClientTrace(requestBody, null, false, error.message, performance.now() - startedAt));
@@ -826,9 +812,13 @@ function draw() {
 }
 
 function loop(now) {
-  const delta = Math.min((now - lastFrame) / 1000, 0.034);
+  const delta = Math.max(0, (now - lastFrame) / 1000);
   lastFrame = now;
-  update(delta);
+  physicsAccumulator += delta;
+  while (physicsAccumulator >= 1 / 120) {
+    update(1 / 120);
+    physicsAccumulator -= 1 / 120;
+  }
   draw();
   animationFrame = requestAnimationFrame(loop);
 }
