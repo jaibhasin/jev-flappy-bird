@@ -96,6 +96,7 @@ function createAIState() {
     latencySamples: [],
     gameTimeMs: 0,
     planEndMs: 0,
+    nextDecisionAtMs: null,
     plannedActions: [],
     runToken: ++aiRunToken,
   };
@@ -632,7 +633,7 @@ async function requestAIDecision() {
   const latencyBudgetMs = getLatencyBudget();
   const targetGameTimeMs = gameState.phase === 'starting'
     ? aiState.gameTimeMs
-    : Math.max(aiState.planEndMs + latencyBudgetMs, aiState.gameTimeMs + latencyBudgetMs);
+    : Math.max(aiState.nextDecisionAtMs ?? (aiState.planEndMs + latencyBudgetMs), aiState.gameTimeMs + latencyBudgetMs);
   const projectedWorld = projectCommittedPlan(targetGameTimeMs);
   if (!projectedWorld) {
     pauseForAIError('The committed plan does not safely reach the next Jev decision point.');
@@ -684,6 +685,7 @@ async function requestAIDecision() {
     if (targetGameTimeMs < aiState.gameTimeMs) throw new Error('Jev plan arrived after its projected decision time.');
     aiState.plannedActions.push(...selectedPlan.actions_ms.map((offsetMs) => ({ atMs: targetGameTimeMs + offsetMs, latency: requestLatency })));
     aiState.planEndMs = targetGameTimeMs + PLAN_HORIZON_MS;
+    aiState.nextDecisionAtMs = aiState.planEndMs + latencyBudgetMs;
     aiState.trajectoryVersion += 1;
     if (gameState.phase === 'starting') gameState.phase = 'running';
     requestAgain = true;

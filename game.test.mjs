@@ -68,7 +68,6 @@ test('Jev waits for its first answer before the bird starts falling', async () =
   stream.onopen();
   assert.equal(requests.length, 1);
   assert.equal(requests[0].state.after_ms, 0);
-  const initialY = requests[0].state.bird_y;
 
   now = 1200;
   nextFrame(now);
@@ -78,20 +77,24 @@ test('Jev waits for its first answer before the bird starts falling', async () =
   stream.onmessage({ data: JSON.stringify({
     rid: requests[0].rid,
     status: 200,
-    body: { action: 'flap', trajectory_version: 0, confidence: 1 },
+    body: {
+      action: 'plan',
+      plan_id: requests[0].plans[0].id,
+      trajectory_version: 0,
+      confidence: 1,
+    },
   }) });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(elements.get('#run-status').textContent, 'Playing');
   assert.equal(requests.length, 2);
-  assert.ok(requests[1].state.bird_y < initialY);
   assert.equal(requests[1].trajectory_version, 1);
-  assert.equal(requests[1].state.after_ms, 424);
+  assert.ok(requests[1].state.decision_at_game_ms >= requests[1].state.committed_plan_end_ms + 600);
+  assert.ok(requests[1].state.candidate_plans.length > 0);
 
   now = 1234;
   nextFrame(now);
   intervalTick();
-  assert.equal(requests.length, 3);
-  assert.ok(requests[1].state.pipe_distance - requests[2].state.pipe_distance >= 6);
+  assert.equal(requests.length, 2);
 
   const world = {
     bird: { y: 300, velocity: 0 },
