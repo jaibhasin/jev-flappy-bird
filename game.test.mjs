@@ -7,158 +7,104 @@ function createElement() {
   return {
     classList: {
       add: (...names) => names.forEach((name) => classes.add(name)),
-      remove: (...names) => names.forEach((name) => classes.delete(name)),
+      remove: (...names) => names.forEach((name => classes.delete(name))),
       toggle: (name, force) => force ? classes.add(name) : classes.delete(name),
       contains: (name) => classes.has(name),
     },
     addEventListener: (type, listener) => listeners.set(type, listener),
     click: () => listeners.get('click')?.(),
     pointerdown: () => listeners.get('pointerdown')?.(),
+    replaceChildren() {},
+    append() {},
+    style: {},
     innerHTML: '',
     textContent: '',
   };
 }
 
-test('Jev plans run at fixed speed across delayed answers and never use a fallback', async () => {
+test('Jev keeps slow physics running with overlapping decisions and no local flap', async () => {
   let now = 0;
   let nextFrame;
   let intervalTick;
   let stream;
   const requests = [];
-  const sentAt = new Map();
   const selectors = [
-    '#score', '#seed-value', '#run-status', '#start-overlay', '#overlay-kicker',
-    '#overlay-title', '#overlay-copy', '#start-button', '#human-mode',
-    '#physics-mode', '#control-hint', '#jev-question', '#jev-state',
-    '#jev-choices', '#jev-action', '#jev-probabilities',
+    '#score', '#run-status', '#start-overlay', '#overlay-kicker', '#overlay-title',
+    '#overlay-copy', '#start-button', '#human-mode', '#physics-mode', '#control-hint',
+    '#live-action', '#action-fill', '#stat-score', '#stat-time', '#stat-latency',
+    '#stat-decisions', '#jev-action', '#jev-probabilities', '#jev-question', '#jev-state',
+    '#jev-choices', '#decision-history', '#decision-counts',
   ];
   const elements = new Map(selectors.map((selector) => [selector, createElement()]));
   const canvas = createElement();
   canvas.width = 540;
   canvas.height = 720;
   canvas.getContext = () => ({
-    arc() {}, beginPath() {}, closePath() {}, ellipse() {}, fill() {},
-    fillRect() {}, lineTo() {}, moveTo() {}, restore() {}, rotate() {},
-    save() {}, stroke() {}, translate() {},
+    arc() {}, beginPath() {}, closePath() {}, ellipse() {}, fill() {}, fillRect() {},
+    lineTo() {}, moveTo() {}, restore() {}, rotate() {}, save() {}, stroke() {}, translate() {},
     createLinearGradient: () => ({ addColorStop() {} }),
   });
   elements.set('#game', canvas);
-
+  globalThis.location = { search: '?runner=jev', origin: 'http://localhost', href: 'http://localhost/' };
+  Object.defineProperty(globalThis, 'crypto', { configurable: true, value: {
+    randomUUID: (() => { let id = 0; return () => `id-${++id}`; })(),
+    getRandomValues: (values) => { values[0] = 123; return values; },
+  } });
   globalThis.performance = { now: () => now };
-  globalThis.document = { body: createElement(), querySelector: (selector) => elements.get(selector) ?? null };
-  globalThis.window = { addEventListener() {} };
-  globalThis.EventSource = class {
-    constructor() { stream = this; }
-  };
+  globalThis.document = { body: createElement(), querySelector: (selector) => elements.get(selector) ?? null,
+    getElementById: (id) => elements.get(`#${id}`) ?? createElement(), createElement: () => createElement() };
+  const parent = { postMessage() {} };
+  globalThis.window = { parent, addEventListener() {}, postMessage() {} };
+  globalThis.EventSource = class { constructor() { stream = this; } };
   globalThis.fetch = async (url, options) => {
     if (url === '/api/jev/logs') return { ok: true, json: async () => ({ logs: [] }) };
     requests.push(JSON.parse(options.body));
-    sentAt.set(requests.at(-1).rid, now);
     return { status: 202 };
   };
   globalThis.requestAnimationFrame = (callback) => { nextFrame = callback; return 1; };
-  globalThis.cancelAnimationFrame = () => {};
   globalThis.setInterval = (callback) => { intervalTick = callback; return 1; };
   globalThis.clearInterval = () => {};
   globalThis.setTimeout = () => 1;
   globalThis.clearTimeout = () => {};
 
-  const { getProjectedState } = await import('./game.js');
+  globalThis.location.search = '';
+  await import(`./game.js?test=${Date.now()}`);
+  stream.onopen();
   elements.get('#physics-mode').click();
   elements.get('#start-button').click();
-  assert.equal(elements.get('#run-status').textContent, 'Waiting for Jev');
-
-  stream.onopen();
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].state.after_ms, 0);
-
-  now = 1200;
-  nextFrame(now);
-  assert.equal(elements.get('#run-status').textContent, 'Waiting for Jev');
-  assert.equal(requests.length, 1);
-
-  stream.onmessage({ data: JSON.stringify({
-    rid: requests[0].rid,
-    status: 200,
-    body: {
-      action: 'plan',
-      plan_id: requests[0].plans[0].id,
-      trajectory_version: 0,
-      confidence: 1,
-    },
-  }) });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(elements.get('#run-status').textContent, 'Playing');
-  assert.equal(requests.length, 2);
-  assert.equal(requests[1].trajectory_version, 1);
-  assert.equal(requests[1].state.decision_at_game_ms, requests[1].state.committed_plan_end_ms);
-  assert.ok(requests[1].state.candidate_plans.length > 0);
 
-  now = 1234;
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].state.prediction_lead_ms, 0);
+  assert.equal(requests[0].plan, undefined);
+
+  now = 300;
   nextFrame(now);
+  assert.equal(elements.get('#stat-time').textContent, '0.0s', 'takeoff waits for the first Jev decision');
+
+  stream.onmessage({ data: JSON.stringify({ rid: requests[0].rid, status: 200,
+    body: { action: 'flap', sequence: 0, probabilities: { flap: 0.8 } } }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 2, 'the next request begins immediately after takeoff');
+  assert.ok(requests[1].state.prediction_lead_ms > 0);
   intervalTick();
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 3, 'Jev requests overlap');
+  for (let frame = 0; frame < 8; frame += 1) { now += 50; nextFrame(now); }
+  assert.equal(elements.get('#stat-time').textContent, '0.2s', 'physics advances at half wall-clock speed');
+  assert.equal(requests.length, 3, 'physics does not wait for in-flight answers');
 
-  const world = {
-    bird: { y: 300, velocity: 0 },
-    pipes: [
-      { x: 100, gapTop: 100, gapBottom: 278 },
-      { x: 355, gapTop: 260, gapBottom: 438 },
-    ],
-  };
-  assert.equal(getProjectedState(0, world).pipe_id, 0);
-  const projected = getProjectedState(0.6, world);
-  assert.equal(projected.pipe_id, 1);
-  assert.equal(projected.gap_top, 260);
-  assert.equal(projected.pipe_distance, 126);
-  assert.equal(projected.clearance_above, 201);
-  assert.equal(projected.position, 'below the gap');
-
-  // Drive an entire seeded course using varied valid mocked Jev choices,
-  // network delays, and frame gaps. The browser test separately uses real Jev.
-  let answered = 1;
-  let frames = 0;
-  const delays = [80, 1400, 700, 250, 1100];
-  const frameTimes = [8, 17, 50, 11, 83];
-  async function answer(request, choiceIndex = 0) {
-    stream.onmessage({ data: JSON.stringify({
-      rid: request.rid, status: 200,
-      body: { action: 'plan', plan_id: request.plans[choiceIndex].id,
-        trajectory_version: request.trajectory_version, confidence: 1 },
-    }) });
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  while (now < 65000 && elements.get('#run-status').textContent === 'Playing') {
-    now += frameTimes[frames++ % frameTimes.length];
+  stream.onmessage({ data: JSON.stringify({ rid: requests[1].rid, status: 200,
+    body: { action: 'flap', sequence: 1 } }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  stream.onmessage({ data: JSON.stringify({ rid: requests[2].rid, status: 200,
+    body: { action: 'wait', sequence: 2 } }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(elements.get('#decision-counts').textContent, /1 superseded/);
+  assert.equal(elements.get('#jev-action').textContent, 'WAIT · superseded');
+  assert.equal(elements.get('#run-status').textContent, 'Playing');
+  for (let frame = 0; frame < 80 && elements.get('#run-status').textContent === 'Playing'; frame += 1) {
+    now += 50;
     nextFrame(now);
-    intervalTick();
-    const request = requests[answered];
-    if (request && now - sentAt.get(request.rid) >= delays[answered % delays.length]) {
-      assert.equal(request.state.decision_at_game_ms, request.state.committed_plan_end_ms);
-      await answer(request, answered % request.plans.length);
-      answered += 1;
-    }
   }
-  assert.equal(elements.get('#score').textContent, 40);
-  assert.equal(elements.get('#overlay-title').textContent, 'Run complete at 40');
-  // Last pipe clears at 59.27 seconds of game time, regardless of response RTT.
-  assert.ok(now - 1200 > 59000 && now - 1200 < 59500, `course duration: ${now - 1200}ms`);
-
-  // On a new run, accept only the first plan, then drop all later answers.
-  // Already selected actions finish, physics continues, and the bird crashes.
-  elements.get('#start-button').click();
-  const first = requests.at(-1);
-  await answer(first);
-  const initial = getProjectedState(0);
-  canvas.pointerdown();
-  assert.deepEqual(getProjectedState(0), initial);
-  const runStartedAt = now;
-  while (now - runStartedAt < 10000 && elements.get('#run-status').textContent === 'Playing') {
-    now += 17;
-    nextFrame(now);
-    intervalTick();
-  }
-  assert.equal(elements.get('#run-status').textContent, 'Game over');
-  assert.ok(now - runStartedAt < 10000, 'No automatic flaps or latency freeze after the approved plan ends');
-
+  assert.equal(elements.get('#run-status').textContent, 'Game over', 'without further Jev flaps, the bird falls');
 });

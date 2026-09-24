@@ -17,7 +17,10 @@ const BIRD_RADIUS = 16;
 const COLLISION_RADIUS = 12;
 const GRAVITY = 950;
 const FLAP_VELOCITY = -330;
-const DECISION_INTERVAL_MS = 50;
+const DECISION_STEP_MS = 400;
+const JEV_GAME_SPEED = 0.5;
+const JEV_REQUEST_INTERVAL_MS = 50;
+const JEV_MAX_IN_FLIGHT = 12;
 const clientId = crypto.randomUUID();
 const ids = ['score', 'run-status', 'start-overlay', 'overlay-kicker', 'overlay-title', 'overlay-copy',
   'start-button', 'human-mode', 'physics-mode', 'control-hint', 'live-action', 'action-fill',
@@ -27,17 +30,22 @@ const ui = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)])
 let gameState;
 let matchId = null;
 let generation = 0;
-let scheduledLaunch = null;
 let lastFrame = performance.now();
+let stepTimer;
+let stepRemaining = 0;
 let accumulator = 0;
 let requestTimer;
-let nextSequence = 0;
 let leadEstimate = 280;
 let queuedAnswers = [];
+let nextSequence = 0;
+let decisionInFlight = false;
 let streamReady = false;
 const responseWaiters = new Map();
 const stream = new EventSource(`/api/decisions/stream?client=${encodeURIComponent(clientId)}`);
-stream.onopen = () => { streamReady = true; };
+stream.onopen = () => {
+  streamReady = true;
+  if (CONTROLLER === 'jev' && gameState?.phase === 'starting') requestJevDecision();
+};
 stream.onerror = () => { streamReady = false; };
 stream.onmessage = (event) => {
   try {
@@ -91,16 +99,19 @@ function resetGame(mode = 'physics', seed = randomSeed()) {
   generation += 1;
   for (const controller of pending.values()) controller.abort();
   pending.clear();
+  decisionInFlight = false;
+  clearTimeout(stepTimer);
   clearInterval(requestTimer);
   queuedAnswers = [];
-  nextSequence = 0;
-  scheduledLaunch = null;
   accumulator = 0;
+  stepRemaining = 0;
+  nextSequence = 0;
   recent = [];
   gameState = { mode, seed, phase: 'ready', score: 0, elapsed: 0, flash: 0,
     bird: { y: HEIGHT * 0.45, velocity: 0, rotation: 0 }, pipes: createPipes(seed),
-    ai: { epoch: 0, appliedSequence: -1, firstAction: null, lastAction: null,
-      warmups: 0, latency: null, received: 0, discarded: 0, skipped: 0, errors: 0, error: null } };
+    ai: { epoch: 0, appliedSequence: -1, discarded: 0, skipped: 0,
+      latency: null, received: 0, errors: 0, error: null,
+      lastAction: null, flapsApplied: 0 } };
   ui['start-overlay'].classList.remove('hidden');
   ui['overlay-kicker'].textContent = `${MODEL_LABEL} ready`;
   ui['overlay-title'].textContent = 'BORN TO FLY.';
@@ -110,46 +121,60 @@ function resetGame(mode = 'physics', seed = randomSeed()) {
   ui['jev-probabilities'].textContent = 'No response yet';
   ui['jev-question'].textContent = 'Should the bird FLAP now or WAIT?';
   ui['jev-state'].textContent = 'Waiting for observation';
-  ui['jev-choices'].textContent = 'Choices: flap · wait';
+  ui['jev-choices'].textContent = 'One action per decision.';
   ui['decision-history'].replaceChildren();
   renderUI();
 }
-function observation(leadMs = 0) {
-  let y = gameState.bird.y;
-  let velocity = gameState.bird.velocity;
-  for (let remaining = leadMs / 1000; remaining > 0.000001;) {
-    const step = Math.min(1 / 120, remaining);
-    velocity += GRAVITY * step;
-    y += velocity * step;
-    remaining -= step;
-  }
-  const shift = PIPE_SPEED * leadMs / 1000;
-  const pipes = gameState.pipes.filter((pipe) => pipe.x - shift + PIPE_WIDTH >= BIRD_X - COLLISION_RADIUS);
-  const pipe = pipes[0];
+function currentObservation() {
+  const world = gameState;
+  const y = world.bird.y;
+  const velocity = world.bird.velocity;
+  const upcoming = world.pipes.filter((pipe) => pipe.x + PIPE_WIDTH >= BIRD_X - COLLISION_RADIUS);
+  const pipe = upcoming[0];
   const upper = pipe ? y - COLLISION_RADIUS - pipe.gapTop : y - COLLISION_RADIUS;
   const lower = pipe ? pipe.gapBottom - y - COLLISION_RADIUS : PLAY_BOTTOM - y - COLLISION_RADIUS;
   const round = (value) => Math.round(value);
   return {
-    observed_game_ms: round(gameState.elapsed * 1000), prediction_lead_ms: leadMs,
+    observed_game_ms: round(gameState.elapsed * 1000),
     bird_y: round(y), bird_velocity: round(velocity),
-    pipe_distance: pipe ? round(pipe.x - shift - BIRD_X) : null,
+    pipe_distance: pipe ? round(pipe.x - BIRD_X) : null,
     pipe_width: PIPE_WIDTH, gap_top: pipe ? round(pipe.gapTop) : null, gap_bottom: pipe ? round(pipe.gapBottom) : null,
     clearance_above: round(upper), clearance_below: round(lower),
     position: upper < 0 ? 'above the gap' : lower < 0 ? 'below the gap' : upper < lower ? 'inside the gap, upper half' : 'inside the gap, lower half',
     motion: velocity < -60 ? 'rising' : velocity > 250 ? 'falling fast' : velocity > 60 ? 'falling' : 'level',
     ceiling_clearance: round(y - COLLISION_RADIUS), ground_clearance: round(PLAY_BOTTOM - y - COLLISION_RADIUS),
-    physics: { gravity: GRAVITY, flap_velocity: FLAP_VELOCITY, pipe_speed: PIPE_SPEED, decision_interval_ms: DECISION_INTERVAL_MS },
+    upcoming_pipes: upcoming.slice(0, 3).map((candidate) => ({ distance: round(candidate.x - BIRD_X),
+      gap_top: round(candidate.gapTop), gap_bottom: round(candidate.gapBottom) })),
+    physics: { gravity: GRAVITY, flap_velocity: FLAP_VELOCITY, pipe_speed: PIPE_SPEED, positive_y_direction: 'down', decision_step_ms: DECISION_STEP_MS },
   };
 }
-function applyAction(action, sequence) {
-  gameState.ai.lastAction = action;
-  gameState.ai.appliedSequence = sequence;
-  if (action === 'flap') {
-    gameState.bird.velocity = FLAP_VELOCITY;
-    gameState.bird.rotation = -0.35;
-    gameState.flash = 0.1;
-    gameState.ai.epoch += 1;
+function jevObservation(leadMs) {
+  let y = gameState.bird.y;
+  let velocity = gameState.bird.velocity;
+  const leadSeconds = leadMs * JEV_GAME_SPEED / 1000;
+  for (let remaining = leadSeconds; remaining > 0.000001;) {
+    const step = Math.min(1 / 120, remaining);
+    velocity += GRAVITY * step;
+    y += velocity * step;
+    remaining -= step;
   }
+  const shift = PIPE_SPEED * leadSeconds;
+  const pipe = gameState.pipes.find((candidate) => candidate.x - shift + PIPE_WIDTH >= BIRD_X - COLLISION_RADIUS);
+  const above = pipe ? y - COLLISION_RADIUS - pipe.gapTop : y - COLLISION_RADIUS;
+  const below = pipe ? pipe.gapBottom - y - COLLISION_RADIUS : PLAY_BOTTOM - y - COLLISION_RADIUS;
+  const round = Math.round;
+  return {
+    observed_game_ms: round(gameState.elapsed * 1000), prediction_lead_ms: leadMs,
+    bird_y: round(y), bird_velocity: round(velocity),
+    pipe_distance: pipe ? round(pipe.x - shift - BIRD_X) : null,
+    gap_top: pipe ? round(pipe.gapTop) : null, gap_bottom: pipe ? round(pipe.gapBottom) : null,
+    clearance_above: round(above), clearance_below: round(below),
+    position: above < 0 ? 'above the gap' : below < 0 ? 'below the gap'
+      : above < below ? 'inside the gap, upper half' : 'inside the gap, lower half',
+    motion: velocity < -60 ? 'rising' : velocity > 250 ? 'falling fast' : velocity > 60 ? 'falling' : 'level',
+    ceiling_clearance: round(y - COLLISION_RADIUS), ground_clearance: round(PLAY_BOTTOM - y - COLLISION_RADIUS),
+    y_axis: 'y grows downward; smaller y is higher',
+  };
 }
 function addHistory(sequence, action, latency, disposition) {
   recent.unshift({ sequence, action, latency, disposition });
@@ -164,33 +189,40 @@ function addHistory(sequence, action, latency, disposition) {
     return row;
   }));
 }
-function consumeAnswers() {
+function consumeJevAnswers() {
   const due = queuedAnswers.filter((answer) => answer.target <= gameState.elapsed * 1000 + 0.001);
   queuedAnswers = queuedAnswers.filter((answer) => answer.target > gameState.elapsed * 1000 + 0.001);
   for (const answer of due.sort((a, b) => a.sequence - b.sequence)) {
     if (gameState.phase !== 'running') return;
     const ai = gameState.ai;
     const stale = answer.epoch !== ai.epoch || answer.sequence <= ai.appliedSequence;
-    const disposition = stale ? 'superseded' : 'applied';
     if (stale) ai.discarded += 1;
     else {
-      applyAction(answer.action, answer.sequence);
-      if (answer.action === 'flap') requestDecision();
+      ai.lastAction = answer.action;
+      ai.appliedSequence = answer.sequence;
+      if (answer.action === 'flap') {
+        applyFlap();
+        ai.epoch += 1;
+        requestJevDecision();
+      }
     }
+    const disposition = stale ? 'superseded' : 'applied';
     ui['jev-action'].textContent = `${answer.action.toUpperCase()} · ${disposition}`;
     addHistory(answer.sequence, answer.action, answer.latency, disposition);
   }
 }
-async function requestDecision() {
-  if (!['starting', 'running'].includes(gameState.phase)) return;
-  if (!streamReady || pending.size >= 12) { gameState.ai.skipped += 1; return; }
-  if (gameState.phase === 'starting' && pending.size) return;
+async function requestJevDecision() {
+  if (!['starting', 'running'].includes(gameState.phase) || !streamReady) return;
+  if (pending.size >= JEV_MAX_IN_FLIGHT || (gameState.phase === 'starting' && pending.size)) {
+    gameState.ai.skipped += 1;
+    return;
+  }
   const sequence = nextSequence++;
   const run = generation;
   const epoch = gameState.ai.epoch;
   const leadMs = gameState.phase === 'starting' ? 0 : Math.round(leadEstimate);
-  const target = gameState.elapsed * 1000 + leadMs;
-  const state = observation(leadMs);
+  const target = gameState.elapsed * 1000 + leadMs * JEV_GAME_SPEED;
+  const state = jevObservation(leadMs);
   const controller = new AbortController();
   pending.set(sequence, controller);
   const timeout = setTimeout(() => controller.abort(), 8000);
@@ -199,31 +231,33 @@ async function requestDecision() {
   try {
     const packet = await postDecision({ state, sequence }, controller.signal);
     if (run !== generation || !['starting', 'running'].includes(gameState.phase)) return;
+    if (packet.status !== 200) throw new Error(packet.body?.error || 'Model request failed');
     const result = packet.body;
-    if (packet.status !== 200) throw new Error(result.error || 'Model request failed');
     if (!['flap', 'wait'].includes(result.action) || result.sequence !== sequence) throw new Error('Invalid model decision');
     const ai = gameState.ai;
     const latency = Math.round(performance.now() - startedAt);
     leadEstimate += (Math.min(latency, 1000) - leadEstimate) * 0.2;
     ai.latency = latency;
+    ai.received += 1;
     ai.error = null;
-    if (gameState.phase === 'starting') {
-      ai.warmups += 1;
-      if (ai.warmups < 2) return;
-      leadEstimate = Math.min(latency, 1000);
-      ai.firstAction = { action: result.action, sequence };
-      ai.received += 1;
-      gameState.phase = 'armed';
-      if (EMBEDDED) report('runner-armed');
-      else scheduledLaunch = Date.now() + 1000;
-      addHistory(sequence, result.action, latency, 'at takeoff');
-    } else {
-      ai.received += 1;
-      queuedAnswers.push({ action: result.action, sequence, epoch, target, latency });
-    }
     const probability = result.probabilities?.[result.action];
     ui['jev-probabilities'].textContent = Number.isFinite(probability)
-      ? `Choice probability: ${Math.round(probability * 100)}%` : 'Model does not supply probabilities';
+      ? `Choice probability: ${Math.round(probability * 100)}%` : 'Model judgment';
+    if (gameState.phase === 'starting') {
+      gameState.phase = 'running';
+      ai.lastAction = result.action;
+      ai.appliedSequence = sequence;
+      if (result.action === 'flap') { applyFlap(); ai.epoch += 1; }
+      ui['start-overlay'].classList.add('hidden');
+      ui['jev-action'].textContent = `${result.action.toUpperCase()} · applied`;
+      addHistory(sequence, result.action, latency, 'applied');
+      lastFrame = performance.now();
+      requestTimer = setInterval(requestJevDecision, JEV_REQUEST_INTERVAL_MS);
+      requestJevDecision();
+    } else {
+      queuedAnswers.push({ action: result.action, sequence, epoch, target, latency });
+      consumeJevAnswers();
+    }
   } catch (error) {
     if (run !== generation || !['starting', 'running'].includes(gameState.phase)) return;
     gameState.ai.errors += 1;
@@ -240,6 +274,68 @@ async function requestDecision() {
     if (run === generation) { pending.delete(sequence); renderUI(); }
   }
 }
+async function requestDecision() {
+  if (!['starting', 'running'].includes(gameState.phase)) return;
+  if (decisionInFlight || !streamReady) return;
+  const ai = gameState.ai;
+  const state = currentObservation();
+  const sequence = nextSequence++;
+  const run = generation;
+  const controller = new AbortController();
+  decisionInFlight = true;
+  pending.set(sequence, controller);
+  const startedAt = performance.now();
+  const timeout = setTimeout(() => controller.abort(), 35_000);
+  ui['jev-state'].textContent = JSON.stringify(state);
+  try {
+    const packet = await postDecision({ state, sequence }, controller.signal);
+    if (run !== generation || !['starting', 'running'].includes(gameState.phase)) return;
+    if (packet.status !== 200) throw new Error(packet.body?.error || 'Model request failed');
+    const result = packet.body;
+    if (!['flap', 'wait'].includes(result.action) || result.sequence !== sequence) throw new Error('Invalid model decision');
+    const latency = Math.round(performance.now() - startedAt);
+    ai.latency = latency;
+    ai.received += 1;
+    ai.error = null;
+    if (gameState.phase === 'starting') {
+      gameState.phase = 'running';
+      ui['start-overlay'].classList.add('hidden');
+    }
+    ai.lastAction = result.action;
+    ui['jev-action'].textContent = `${result.action.toUpperCase()} · applied`;
+    ui['jev-probabilities'].textContent = Number.isFinite(result.probabilities?.[result.action])
+      ? `Choice probability: ${Math.round(result.probabilities[result.action] * 100)}%` : 'Model judgment';
+    if (result.action === 'flap') applyFlap();
+    addHistory(sequence, result.action, latency, 'applied');
+    stepRemaining = DECISION_STEP_MS / 1000;
+    lastFrame = performance.now();
+  } catch (error) {
+    if (run !== generation || !['starting', 'running'].includes(gameState.phase)) return;
+    ai.errors += 1;
+    ai.error = error.message;
+    addHistory(sequence, 'error', Math.round(performance.now() - startedAt), 'no input');
+    if (gameState.phase === 'starting') {
+      gameState.phase = 'aierror';
+      ui['overlay-title'].textContent = 'CONNECTION ERROR';
+      ui['overlay-copy'].textContent = error.message;
+      report('runner-error', { error: error.message });
+    }
+  } finally {
+    clearTimeout(timeout);
+    if (run === generation) {
+      pending.delete(sequence);
+      decisionInFlight = false;
+      renderUI();
+    }
+  }
+}
+function applyFlap() {
+  gameState.bird.velocity = FLAP_VELOCITY;
+  gameState.bird.rotation = -0.35;
+  gameState.flash = 0.1;
+  gameState.ai.lastAction = 'flap';
+  gameState.ai.flapsApplied += 1;
+}
 function startGame() {
   if (gameState.mode === 'human') {
     gameState.phase = 'running';
@@ -247,16 +343,19 @@ function startGame() {
     lastFrame = performance.now();
   } else {
     gameState.phase = 'starting';
-    requestDecision();
-    requestTimer = setInterval(requestDecision, DECISION_INTERVAL_MS);
+    if (CONTROLLER === 'jev') requestJevDecision();
+    else requestDecision();
   }
 }
 function endGame(reason) {
   gameState.phase = 'gameover';
-  clearInterval(requestTimer);
-  queuedAnswers = [];
   for (const controller of pending.values()) controller.abort();
   pending.clear();
+  decisionInFlight = false;
+  clearTimeout(stepTimer);
+  clearInterval(requestTimer);
+  queuedAnswers = [];
+  stepRemaining = 0;
   ui['start-overlay'].classList.remove('hidden');
   ui['overlay-kicker'].textContent = MODEL_LABEL;
   ui['overlay-title'].textContent = `Run ended at ${gameState.score}`;
@@ -277,7 +376,7 @@ function update(delta) {
   }
   if (bird.y - COLLISION_RADIUS < 0) { endGame('ceiling'); return; }
   if (bird.y + COLLISION_RADIUS > PLAY_BOTTOM) { endGame('ground'); return; }
-  const pipe = gameState.pipes.find((pipe) => BIRD_X + COLLISION_RADIUS > pipe.x && BIRD_X - COLLISION_RADIUS < pipe.x + PIPE_WIDTH);
+  const pipe = gameState.pipes.find((candidate) => BIRD_X + COLLISION_RADIUS > candidate.x && BIRD_X - COLLISION_RADIUS < candidate.x + PIPE_WIDTH);
   if (pipe && (bird.y - COLLISION_RADIUS < pipe.gapTop || bird.y + COLLISION_RADIUS > pipe.gapBottom)) {
     endGame(bird.y < pipe.gapTop ? 'upper pipe' : 'lower pipe');
   } else if (gameState.score === gameState.pipes.length) endGame('complete');
@@ -289,17 +388,19 @@ function renderUI() {
   ui['stat-time'].textContent = `${gameState.elapsed.toFixed(1)}s`;
   ui['stat-latency'].textContent = ai.latency === null ? '-' : `${ai.latency}ms`;
   ui['stat-decisions'].textContent = ai.received;
-  ui['decision-counts'].textContent = `${pending.size} in flight · ${ai.discarded} superseded · ${ai.skipped} skipped · ${ai.errors} errors`;
-  const action = ['running', 'armed'].includes(gameState.phase) ? (ai.lastAction?.toUpperCase() || 'READY')
+  ui['decision-counts'].textContent = CONTROLLER === 'jev'
+    ? `${pending.size} in flight · ${ai.discarded} superseded · ${ai.skipped} skipped · ${ai.errors} errors`
+    : `${pending.size} in flight · ${ai.errors} errors`;
+  const action = gameState.phase === 'running' ? (ai.lastAction?.toUpperCase() || 'READY')
     : gameState.phase === 'gameover' ? 'ENDED' : gameState.phase === 'starting' ? 'THINK' : gameState.phase === 'aierror' ? 'ERROR' : 'READY';
-  ui['live-action'].textContent = action;
-  ui['action-fill'].style.width = action === 'FLAP' ? '100%' : '8%';
+  ui['live-action'].textContent = gameState.flash > 0 ? 'FLAP' : action;
+  ui['action-fill'].style.width = (gameState.flash > 0 || action === 'FLAP') ? '100%' : '8%';
   ui['run-status'].textContent = gameState.phase === 'running' ? ai.error ? 'API error' : 'Playing'
-    : gameState.phase === 'gameover' ? 'Game over' : gameState.phase === 'starting' ? 'Connecting' : gameState.phase === 'armed' ? 'Ready' : 'Ready';
-  if (['starting', 'armed'].includes(gameState.phase) && gameState.elapsed === 0) {
-    ui['overlay-kicker'].textContent = gameState.phase === 'armed' ? 'First decision ready' : 'Awaiting first decision';
-    ui['overlay-title'].textContent = scheduledLaunch ? String(Math.max(1, Math.min(3, Math.ceil((scheduledLaunch - Date.now()) / 1000)))) : gameState.phase === 'armed' ? 'ALL SET.' : 'THINKING…';
-    ui['overlay-copy'].textContent = 'Both pilots launch together.';
+    : gameState.phase === 'gameover' ? 'Game over' : gameState.phase === 'starting' ? 'Connecting' : 'Ready';
+  if (gameState.phase === 'starting' && gameState.elapsed === 0) {
+    ui['overlay-kicker'].textContent = 'Waiting for first decision';
+    ui['overlay-title'].textContent = 'THINKING…';
+    ui['overlay-copy'].textContent = 'The game begins when the model responds.';
   }
   if (ai.error) ui['jev-state'].textContent = ai.error;
 }
@@ -422,33 +523,27 @@ function draw() {
 }
 
 function loop(now) {
-  if (gameState.phase === 'armed' && scheduledLaunch && Date.now() >= scheduledLaunch) {
-    gameState.phase = 'running';
-    lastFrame = now - Math.max(0, Date.now() - scheduledLaunch);
-    accumulator = 0;
-    scheduledLaunch = null;
-    applyAction(gameState.ai.firstAction.action, gameState.ai.firstAction.sequence);
-    ui['start-overlay'].classList.add('hidden');
-    clearInterval(requestTimer);
-    requestDecision();
-    requestTimer = setInterval(requestDecision, DECISION_INTERVAL_MS);
-    ui['jev-action'].textContent = `${gameState.ai.firstAction.action.toUpperCase()} · applied`;
-    const current = recent.find((entry) => entry.sequence === gameState.ai.firstAction.sequence);
-    if (current) {
-      recent = recent.filter((entry) => entry !== current);
-      addHistory(current.sequence, current.action, current.latency, 'applied');
-    }
-  }
-  if (gameState.phase === 'running') {
-    accumulator += Math.max(0, (now - lastFrame) / 1000);
+  if (gameState.phase === 'running' && (CONTROLLER === 'jev' || gameState.mode === 'human')) {
+    accumulator += Math.min(0.05, Math.max(0, (now - lastFrame) / 1000))
+      * (CONTROLLER === 'jev' && gameState.mode === 'physics' ? JEV_GAME_SPEED : 1);
     while (accumulator >= 1 / 120 && gameState.phase === 'running') {
-      if (gameState.mode === 'physics') consumeAnswers();
+      if (CONTROLLER === 'jev' && gameState.mode === 'physics') consumeJevAnswers();
       update(1 / 120);
       accumulator -= 1 / 120;
-
     }
-  }
-  lastFrame = now;
+    lastFrame = now;
+  } else if (gameState.phase === 'running' && stepRemaining > 0) {
+    const delta = Math.min(stepRemaining, Math.max(0, (now - lastFrame) / 1000));
+    if (delta > 0) {
+      update(delta);
+      stepRemaining -= delta;
+      lastFrame = now;
+      if (stepRemaining <= 0.000001 && gameState.phase === 'running') {
+        stepRemaining = 0;
+        requestDecision();
+      }
+    }
+  } else lastFrame = now;
   renderUI();
   draw();
   requestAnimationFrame(loop);
@@ -462,7 +557,6 @@ window.addEventListener('message', (event) => {
     startGame();
   }
   if (data?.matchId !== matchId) return;
-  if (data.type === 'comparison-launch' && gameState.phase === 'armed' && Number.isFinite(data.launchAt)) scheduledLaunch = data.launchAt;
 });
 ui['start-button'].addEventListener('click', () => {
   if (EMBEDDED) return;
@@ -474,7 +568,7 @@ ui['physics-mode'].addEventListener('click', () => resetGame('physics'));
 function humanFlap() {
   if (gameState.mode !== 'human') return;
   if (gameState.phase !== 'running') { resetGame('human'); startGame(); }
-  applyAction('flap', 0);
+  applyFlap();
 }
 canvas.addEventListener('pointerdown', humanFlap);
 window.addEventListener('keydown', (event) => {

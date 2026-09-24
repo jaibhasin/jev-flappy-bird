@@ -10,19 +10,24 @@ loadLocalEnv();
 
 const MODEL = process.env.TYPESAFE_DEFAULT_MODEL || 'jev-latest';
 const OPENAI_MODEL = 'gpt-6-luna';
-const REQUEST_TIMEOUT_MS = Number(process.env.JEV_TIMEOUT_MS) || 6000;
+const REQUEST_TIMEOUT_MS = Number(process.env.JEV_TIMEOUT_MS) || 30_000;
 const WARM_EVERY_MS = 20_000;
 const WARM_FOR_MS = 10 * 60_000;
 const WARM_AFTER_IDLE_MS = WARM_EVERY_MS / 2;
 const JEV_LOG_LIMIT = 50;
 const JEV_LOG_PATH = `${ROOT}jev-logs.jsonl`;
 const ACTION_INSTRUCTIONS = {
-  question: 'Should the bird flap or wait to pass safely through the next gap?',
-  guidance: 'The observation describes the expected scene when your answer arrives, assuming no intervening flap. Choose for that scene. Y increases downward. Flap gives one upward impulse; wait applies no input. Consider position within the gap as well as motion. Stay between ceiling and ground when the next pipe is distant. Only your choice controls the bird.',
+  question: 'Given the current game state and physics, should the bird FLAP now or WAIT?',
+  guidance: 'Choose exactly one immediate action for the current state. Positive Y points downward. A flap sets the bird vertical velocity to -330 px/s; gravity adds 950 px/s² downward. Pipes move left at 178 px/s. Return your own judgment without proposing plans or future actions.',
 };
 const ACTION_CHOICES = {
-  flap: 'An upward impulse is needed: the bird is below the gap or in its lower half and not already rising toward safety.',
-  wait: 'No upward impulse is needed: the bird is above the gap, in its upper half, or already rising safely through it.',
+  flap: 'Apply one upward impulse now.',
+  wait: 'Do not apply an impulse now.',
+};
+const JEV_QUESTION = 'What should the bird do right now to pass safely through the gap of the next pipe?';
+const JEV_CHOICES = {
+  flap: 'Flap: the bird is below the gap, or is in the lower half of the gap and not rising.',
+  wait: 'Wait: the bird is above the gap (even when falling fast), or is in the upper half of the gap, or is rising inside the gap.',
 };
 const streams = new Map();
 function openStream(response, client) {
@@ -161,13 +166,17 @@ async function handleAction(request, response, controller, suppliedInput) {
   }
   const clientKey = `${controller}:${input.client}`;
   const active = inFlightByClient.get(clientKey) || 0;
-  if (active >= 12) { sendError(response, 429, 'Too many pending decisions.'); return; }
+  if (active >= (controller === 'jev' ? 12 : 1)) {
+    sendError(response, 429, 'Too many pending decisions for this game.'); return;
+  }
   inFlightByClient.set(clientKey, active + 1);
   const startedAt = Date.now();
   const modelRequest = {
     model: controller === 'jev' ? MODEL : OPENAI_MODEL,
     state: input.state,
-    questions: { action: { type: 'choice', instructions: ACTION_INSTRUCTIONS, criteria: ACTION_CHOICES } },
+    questions: controller === 'jev'
+      ? { action: { type: 'choice', instructions: JEV_QUESTION, criteria: JEV_CHOICES } }
+      : { action: { type: 'choice', instructions: ACTION_INSTRUCTIONS, criteria: ACTION_CHOICES } },
   };
   try {
     let result;
@@ -176,7 +185,7 @@ async function handleAction(request, response, controller, suppliedInput) {
       keepTypeSafeConnectionWarm();
       const data = await getTypeSafeClient().systemOne({
         state: input.state,
-        questions: { action: choice(ACTION_INSTRUCTIONS, ACTION_CHOICES) },
+        questions: { action: choice(JEV_QUESTION, JEV_CHOICES) },
       });
       const answer = data.answers?.action;
       result = { action: answer?.choice, confidence: answer?.confidence ?? null,
@@ -189,9 +198,9 @@ async function handleAction(request, response, controller, suppliedInput) {
         headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json', 'Accept-Encoding': 'identity', 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         body: JSON.stringify({
-          model: OPENAI_MODEL, reasoning_effort: 'none', max_completion_tokens: 32,
+          model: OPENAI_MODEL, reasoning_effort: 'none', max_completion_tokens: 400,
           messages: [
-            { role: 'system', content: JSON.stringify({ instructions: ACTION_INSTRUCTIONS, criteria: ACTION_CHOICES }) },
+            { role: 'system', content: JSON.stringify({ role: 'Flappy Bird autopilot', instructions: ACTION_INSTRUCTIONS, choices: ACTION_CHOICES }) },
             { role: 'user', content: JSON.stringify({ state: input.state }) },
           ],
           response_format: { type: 'json_schema', json_schema: {
@@ -216,6 +225,14 @@ async function handleAction(request, response, controller, suppliedInput) {
     const message = error instanceof APITimeoutError || error.name === 'TimeoutError'
       ? 'Model request timed out.' : error instanceof APIError || error instanceof APIConnectionError
         ? 'Could not get a decision from TypeSafe.' : error.message;
+    if (controller === 'jev') {
+      try {
+        saveJevLog({ id: randomUUID(), at: new Date(startedAt).toISOString(),
+          duration_ms: Date.now() - startedAt, ok: false, request: modelRequest,
+          error: { message, name: error.name, status: error.status ?? error.statusCode ?? null,
+            code: error.code ?? null, cause: error.cause?.message ?? null } });
+      } catch {}
+    }
     sendError(response, 502, message);
   } finally {
     const remaining = (inFlightByClient.get(clientKey) || 1) - 1;
