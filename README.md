@@ -43,6 +43,14 @@ They see identical observations initially, then each sees its own bird state as 
 The live panels show actual responses, round-trip response times, application status, and error counts.
 Identical choices are possible; no artificial variation is added to model actions.
 
+## Local decision logs
+
+The server appends GPT-6 Luna requests, responses, timing, and errors to `luna-logs.jsonl`.
+Each record includes the observed game time, prediction lead, request sequence, and number of in-flight requests.
+Read the records at <http://localhost:4173/api/openai/logs> or inspect the JSONL file directly.
+Clear the Luna log with `DELETE /api/openai/logs`.
+The log stays local and is ignored by Git.
+
 ## Game physics
 
 - Canvas: `540 x 720` pixels.

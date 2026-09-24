@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { APIError, APITimeoutError, APIConnectionError, choice, TypeSafeClient } from '@typesafe-ai/sdk';
 import { Agent, fetch as undiciFetch } from 'undici';
@@ -16,6 +16,7 @@ const WARM_FOR_MS = 10 * 60_000;
 const WARM_AFTER_IDLE_MS = WARM_EVERY_MS / 2;
 const JEV_LOG_LIMIT = 50;
 const JEV_LOG_PATH = `${ROOT}jev-logs.jsonl`;
+const LUNA_LOG_PATH = `${ROOT}luna-logs.jsonl`;
 const ACTION_QUESTION = 'What should the bird do right now to pass safely through the gap of the next pipe?';
 const ACTION_CHOICES = {
   flap: 'Flap: the bird is below the gap, or is in the lower half of the gap and not rising.',
@@ -102,6 +103,18 @@ function readJevLogs() {
 function saveJevLog(entry) {
   const logs = [...readJevLogs(), entry].slice(-JEV_LOG_LIMIT);
   writeFileSync(JEV_LOG_PATH, `${logs.map((log) => JSON.stringify(log)).join('\n')}\n`);
+}
+
+function readLunaLogs() {
+  if (!existsSync(LUNA_LOG_PATH)) return [];
+  return readFileSync(LUNA_LOG_PATH, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+function saveLunaLog(entry) {
+  appendFileSync(LUNA_LOG_PATH, `${JSON.stringify(entry)}\n`);
 }
 
 async function readJson(request) {
@@ -208,13 +221,32 @@ async function handleAction(request, response, controller, suppliedInput) {
     if (!['flap', 'wait'].includes(result.action)) throw new Error('Model returned an invalid action.');
     result.sequence = input.sequence;
     const trace = { id: randomUUID(), at: new Date(startedAt).toISOString(),
-      duration_ms: Date.now() - startedAt, ok: true, request: modelRequest, result };
+      completed_at: new Date().toISOString(), duration_ms: Date.now() - startedAt,
+      ok: true, controller, client: input.client, request_id: input.rid,
+      sequence: input.sequence, in_flight: active + 1,
+      observed_game_ms: input.state.observed_game_ms ?? null,
+      prediction_lead_ms: input.state.prediction_lead_ms ?? null,
+      request: modelRequest, result };
+    if (controller === 'openai') { try { saveLunaLog(trace); } catch {} }
     sendJson(response, 200, { ...result, trace });
     if (controller === 'jev') { try { saveJevLog(trace); } catch {} }
   } catch (error) {
     const message = error instanceof APITimeoutError || error.name === 'TimeoutError'
       ? 'Model request timed out.' : error instanceof APIError || error instanceof APIConnectionError
         ? `Could not get a decision from ${controller === 'jev' ? 'TypeSafe' : 'OpenAI'}.` : error.message;
+    if (controller === 'openai') {
+      try {
+        saveLunaLog({ id: randomUUID(), at: new Date(startedAt).toISOString(),
+          completed_at: new Date().toISOString(), duration_ms: Date.now() - startedAt,
+          ok: false, controller, client: input.client, request_id: input.rid,
+          sequence: input.sequence, in_flight: active + 1,
+          observed_game_ms: input.state.observed_game_ms ?? null,
+          prediction_lead_ms: input.state.prediction_lead_ms ?? null,
+          request: modelRequest,
+          error: { message, name: error.name, status: error.status ?? error.statusCode ?? null,
+            code: error.code ?? null, cause: error.cause?.message ?? null } });
+      } catch {}
+    }
     if (controller === 'jev') {
       try {
         saveJevLog({ id: randomUUID(), at: new Date(startedAt).toISOString(),
@@ -285,6 +317,17 @@ const server = createServer(async (request, response) => {
 
   if (request.method === 'DELETE' && url.pathname === '/api/jev/logs') {
     writeFileSync(JEV_LOG_PATH, '');
+    sendJson(response, 200, { ok: true });
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/openai/logs') {
+    sendJson(response, 200, { logs: readLunaLogs() });
+    return;
+  }
+
+  if (request.method === 'DELETE' && url.pathname === '/api/openai/logs') {
+    writeFileSync(LUNA_LOG_PATH, '');
     sendJson(response, 200, { ok: true });
     return;
   }
