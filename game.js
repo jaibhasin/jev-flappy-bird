@@ -434,7 +434,7 @@ function draw() {
 
 function loop(now) {
   if (gameState.phase === 'running') {
-    accumulator += Math.min(0.05, Math.max(0, (now - lastFrame) / 1000))
+    accumulator += Math.max(0, (now - lastFrame) / 1000)
       * (gameState.mode === 'physics' ? MODEL_GAME_SPEED : 1);
     while (accumulator >= 1 / 120 && gameState.phase === 'running') {
       if (gameState.mode === 'physics') consumeModelAnswers();

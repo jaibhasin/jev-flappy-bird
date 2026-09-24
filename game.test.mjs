@@ -94,6 +94,9 @@ for (const runner of ['jev', 'openai']) test(`${runner} keeps the same slow phys
   for (let frame = 0; frame < 8; frame += 1) { now += 50; nextFrame(now); }
   assert.equal(elements.get('#stat-time').textContent, '0.2s', 'physics advances at half wall-clock speed');
   assert.equal(requests.length, 3, 'physics does not wait for in-flight answers');
+  now += 200;
+  nextFrame(now);
+  assert.equal(elements.get('#stat-time').textContent, '0.3s', 'a delayed frame still advances by the full half-speed time');
 
   stream.onmessage({ data: JSON.stringify({ rid: requests[1].rid, status: 200,
     body: { action: 'flap', sequence: 1 } }) });
