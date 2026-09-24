@@ -23,16 +23,15 @@ The API keys stay on the server.
 
 ## How the models play
 
-Each model receives its bird's current position and velocity, the next three pipes, and the game physics.
+Each model receives a projected bird position and velocity, the next pipe, and its gap clearances.
 It returns one `flap` or `wait` action through TypeSafe or the OpenAI API.
-No future states, candidate plans, scheduled actions, safety overrides, or fallback flaps are used.
+No candidate plans, scheduled actions, safety overrides, or fallback flaps are used.
 
-Jev's bird and pipes run continuously at half real-time speed.
-The game asks Jev every 50 ms and can have up to 12 decisions in flight.
+Both birds and their pipes run continuously at half real-time speed.
+The game asks each model every 50 ms and can have up to 12 decisions in flight per game.
 Each question describes the projected scene when its answer is expected to arrive.
 A `wait` leaves other pending answers valid, while a `flap` supersedes answers based on the old flight path.
-If Jev stops answering, the bird keeps falling without a local rescue flap.
-Luna still uses the existing 400 ms decision step and waits for each answer.
+If a model stops answering, its bird keeps falling without a local rescue flap.
 The local server delivers answers over an event stream, and both upstream APIs use persistent HTTP/2-capable connections.
 
 Response times, the latest action, in-flight status, and errors remain visible.
@@ -52,4 +51,4 @@ Identical choices are possible; no artificial variation is added to model action
 - Pipe gap: `178 px`.
 - Pipe pattern: deterministic from a fresh shared seed for each matchup.
 
-The two lanes currently use different timing while Jev's continuous control is being tested.
+The two lanes use the same physics speed, fixed simulation step, and decision cadence.

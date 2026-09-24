@@ -29,7 +29,7 @@ if (runner === 'jev' || runner === 'openai') {
       <span class="versus" aria-hidden="true">VS</span>
       <section class="comparison-lane luna-lane"><header class="lane-header"><div class="model-identity"><span class="model-icon">✳</span><div><h2>GPT-6 Luna</h2><span>OpenAI</span></div></div><span class="lane-tag">PLAYER 02</span></header><iframe title="GPT-6 Luna controlled Flappy Bird" src="?runner=openai"></iframe></section>
     </div>
-    <footer class="arena-footer"><span>A little bird. A big model matchup.</span><span>Jev: continuous half-speed physics <b>·</b> Luna: decision-paced</span></footer>`;
+    <footer class="arena-footer"><span>A little bird. A big model matchup.</span><span>Both models: continuous half-speed physics <b>·</b> 50 ms requests</span></footer>`;
 
   const frames = [...comparison.querySelectorAll('iframe')];
   const ready = new Set();

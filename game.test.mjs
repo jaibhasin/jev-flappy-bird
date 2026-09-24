@@ -22,12 +22,13 @@ function createElement() {
   };
 }
 
-test('Jev keeps slow physics running with overlapping decisions and no local flap', async () => {
+for (const runner of ['jev', 'openai']) test(`${runner} keeps the same slow physics running with overlapping decisions`, async () => {
   let now = 0;
   let nextFrame;
   let intervalTick;
   let stream;
   const requests = [];
+  const urls = [];
   const selectors = [
     '#score', '#run-status', '#start-overlay', '#overlay-kicker', '#overlay-title',
     '#overlay-copy', '#start-button', '#human-mode', '#physics-mode', '#control-hint',
@@ -45,7 +46,7 @@ test('Jev keeps slow physics running with overlapping decisions and no local fla
     createLinearGradient: () => ({ addColorStop() {} }),
   });
   elements.set('#game', canvas);
-  globalThis.location = { search: '?runner=jev', origin: 'http://localhost', href: 'http://localhost/' };
+  globalThis.location = { search: `?runner=${runner}`, origin: 'http://localhost', href: 'http://localhost/' };
   Object.defineProperty(globalThis, 'crypto', { configurable: true, value: {
     randomUUID: (() => { let id = 0; return () => `id-${++id}`; })(),
     getRandomValues: (values) => { values[0] = 123; return values; },
@@ -53,11 +54,12 @@ test('Jev keeps slow physics running with overlapping decisions and no local fla
   globalThis.performance = { now: () => now };
   globalThis.document = { body: createElement(), querySelector: (selector) => elements.get(selector) ?? null,
     getElementById: (id) => elements.get(`#${id}`) ?? createElement(), createElement: () => createElement() };
-  const parent = { postMessage() {} };
-  globalThis.window = { parent, addEventListener() {}, postMessage() {} };
+  globalThis.window = { addEventListener() {}, postMessage() {} };
+  globalThis.window.parent = globalThis.window;
   globalThis.EventSource = class { constructor() { stream = this; } };
   globalThis.fetch = async (url, options) => {
     if (url === '/api/jev/logs') return { ok: true, json: async () => ({ logs: [] }) };
+    urls.push(url);
     requests.push(JSON.parse(options.body));
     return { status: 202 };
   };
@@ -67,14 +69,14 @@ test('Jev keeps slow physics running with overlapping decisions and no local fla
   globalThis.setTimeout = () => 1;
   globalThis.clearTimeout = () => {};
 
-  globalThis.location.search = '';
-  await import(`./game.js?test=${Date.now()}`);
+  await import(`./game.js?test=${runner}-${Date.now()}`);
   stream.onopen();
   elements.get('#physics-mode').click();
   elements.get('#start-button').click();
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(requests.length, 1);
+  assert.equal(urls[0], `/api/${runner}/action`);
   assert.equal(requests[0].state.prediction_lead_ms, 0);
   assert.equal(requests[0].plan, undefined);
 
@@ -88,7 +90,7 @@ test('Jev keeps slow physics running with overlapping decisions and no local fla
   assert.equal(requests.length, 2, 'the next request begins immediately after takeoff');
   assert.ok(requests[1].state.prediction_lead_ms > 0);
   intervalTick();
-  assert.equal(requests.length, 3, 'Jev requests overlap');
+  assert.equal(requests.length, 3, 'model requests overlap');
   for (let frame = 0; frame < 8; frame += 1) { now += 50; nextFrame(now); }
   assert.equal(elements.get('#stat-time').textContent, '0.2s', 'physics advances at half wall-clock speed');
   assert.equal(requests.length, 3, 'physics does not wait for in-flight answers');
@@ -106,5 +108,5 @@ test('Jev keeps slow physics running with overlapping decisions and no local fla
     now += 50;
     nextFrame(now);
   }
-  assert.equal(elements.get('#run-status').textContent, 'Game over', 'without further Jev flaps, the bird falls');
+  assert.equal(elements.get('#run-status').textContent, 'Game over', 'without further model flaps, the bird falls');
 });

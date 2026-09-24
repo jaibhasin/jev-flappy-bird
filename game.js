@@ -17,10 +17,9 @@ const BIRD_RADIUS = 16;
 const COLLISION_RADIUS = 12;
 const GRAVITY = 950;
 const FLAP_VELOCITY = -330;
-const DECISION_STEP_MS = 400;
-const JEV_GAME_SPEED = 0.5;
-const JEV_REQUEST_INTERVAL_MS = 50;
-const JEV_MAX_IN_FLIGHT = 12;
+const MODEL_GAME_SPEED = 0.5;
+const MODEL_REQUEST_INTERVAL_MS = 50;
+const MODEL_MAX_IN_FLIGHT = 12;
 const clientId = crypto.randomUUID();
 const ids = ['score', 'run-status', 'start-overlay', 'overlay-kicker', 'overlay-title', 'overlay-copy',
   'start-button', 'human-mode', 'physics-mode', 'control-hint', 'live-action', 'action-fill',
@@ -31,20 +30,17 @@ let gameState;
 let matchId = null;
 let generation = 0;
 let lastFrame = performance.now();
-let stepTimer;
-let stepRemaining = 0;
 let accumulator = 0;
 let requestTimer;
 let leadEstimate = 280;
 let queuedAnswers = [];
 let nextSequence = 0;
-let decisionInFlight = false;
 let streamReady = false;
 const responseWaiters = new Map();
 const stream = new EventSource(`/api/decisions/stream?client=${encodeURIComponent(clientId)}`);
 stream.onopen = () => {
   streamReady = true;
-  if (CONTROLLER === 'jev' && gameState?.phase === 'starting') requestJevDecision();
+  if (gameState?.phase === 'starting') requestModelDecision();
 };
 stream.onerror = () => { streamReady = false; };
 stream.onmessage = (event) => {
@@ -99,12 +95,10 @@ function resetGame(mode = 'physics', seed = randomSeed()) {
   generation += 1;
   for (const controller of pending.values()) controller.abort();
   pending.clear();
-  decisionInFlight = false;
-  clearTimeout(stepTimer);
   clearInterval(requestTimer);
   queuedAnswers = [];
   accumulator = 0;
-  stepRemaining = 0;
+  leadEstimate = 280;
   nextSequence = 0;
   recent = [];
   gameState = { mode, seed, phase: 'ready', score: 0, elapsed: 0, flash: 0,
@@ -125,33 +119,10 @@ function resetGame(mode = 'physics', seed = randomSeed()) {
   ui['decision-history'].replaceChildren();
   renderUI();
 }
-function currentObservation() {
-  const world = gameState;
-  const y = world.bird.y;
-  const velocity = world.bird.velocity;
-  const upcoming = world.pipes.filter((pipe) => pipe.x + PIPE_WIDTH >= BIRD_X - COLLISION_RADIUS);
-  const pipe = upcoming[0];
-  const upper = pipe ? y - COLLISION_RADIUS - pipe.gapTop : y - COLLISION_RADIUS;
-  const lower = pipe ? pipe.gapBottom - y - COLLISION_RADIUS : PLAY_BOTTOM - y - COLLISION_RADIUS;
-  const round = (value) => Math.round(value);
-  return {
-    observed_game_ms: round(gameState.elapsed * 1000),
-    bird_y: round(y), bird_velocity: round(velocity),
-    pipe_distance: pipe ? round(pipe.x - BIRD_X) : null,
-    pipe_width: PIPE_WIDTH, gap_top: pipe ? round(pipe.gapTop) : null, gap_bottom: pipe ? round(pipe.gapBottom) : null,
-    clearance_above: round(upper), clearance_below: round(lower),
-    position: upper < 0 ? 'above the gap' : lower < 0 ? 'below the gap' : upper < lower ? 'inside the gap, upper half' : 'inside the gap, lower half',
-    motion: velocity < -60 ? 'rising' : velocity > 250 ? 'falling fast' : velocity > 60 ? 'falling' : 'level',
-    ceiling_clearance: round(y - COLLISION_RADIUS), ground_clearance: round(PLAY_BOTTOM - y - COLLISION_RADIUS),
-    upcoming_pipes: upcoming.slice(0, 3).map((candidate) => ({ distance: round(candidate.x - BIRD_X),
-      gap_top: round(candidate.gapTop), gap_bottom: round(candidate.gapBottom) })),
-    physics: { gravity: GRAVITY, flap_velocity: FLAP_VELOCITY, pipe_speed: PIPE_SPEED, positive_y_direction: 'down', decision_step_ms: DECISION_STEP_MS },
-  };
-}
-function jevObservation(leadMs) {
+function modelObservation(leadMs) {
   let y = gameState.bird.y;
   let velocity = gameState.bird.velocity;
-  const leadSeconds = leadMs * JEV_GAME_SPEED / 1000;
+  const leadSeconds = leadMs * MODEL_GAME_SPEED / 1000;
   for (let remaining = leadSeconds; remaining > 0.000001;) {
     const step = Math.min(1 / 120, remaining);
     velocity += GRAVITY * step;
@@ -189,7 +160,7 @@ function addHistory(sequence, action, latency, disposition) {
     return row;
   }));
 }
-function consumeJevAnswers() {
+function consumeModelAnswers() {
   const due = queuedAnswers.filter((answer) => answer.target <= gameState.elapsed * 1000 + 0.001);
   queuedAnswers = queuedAnswers.filter((answer) => answer.target > gameState.elapsed * 1000 + 0.001);
   for (const answer of due.sort((a, b) => a.sequence - b.sequence)) {
@@ -203,7 +174,7 @@ function consumeJevAnswers() {
       if (answer.action === 'flap') {
         applyFlap();
         ai.epoch += 1;
-        requestJevDecision();
+        requestModelDecision();
       }
     }
     const disposition = stale ? 'superseded' : 'applied';
@@ -211,9 +182,9 @@ function consumeJevAnswers() {
     addHistory(answer.sequence, answer.action, answer.latency, disposition);
   }
 }
-async function requestJevDecision() {
+async function requestModelDecision() {
   if (!['starting', 'running'].includes(gameState.phase) || !streamReady) return;
-  if (pending.size >= JEV_MAX_IN_FLIGHT || (gameState.phase === 'starting' && pending.size)) {
+  if (pending.size >= MODEL_MAX_IN_FLIGHT || (gameState.phase === 'starting' && pending.size)) {
     gameState.ai.skipped += 1;
     return;
   }
@@ -221,8 +192,8 @@ async function requestJevDecision() {
   const run = generation;
   const epoch = gameState.ai.epoch;
   const leadMs = gameState.phase === 'starting' ? 0 : Math.round(leadEstimate);
-  const target = gameState.elapsed * 1000 + leadMs * JEV_GAME_SPEED;
-  const state = jevObservation(leadMs);
+  const target = gameState.elapsed * 1000 + leadMs * MODEL_GAME_SPEED;
+  const state = modelObservation(leadMs);
   const controller = new AbortController();
   pending.set(sequence, controller);
   const timeout = setTimeout(() => controller.abort(), 8000);
@@ -252,11 +223,11 @@ async function requestJevDecision() {
       ui['jev-action'].textContent = `${result.action.toUpperCase()} · applied`;
       addHistory(sequence, result.action, latency, 'applied');
       lastFrame = performance.now();
-      requestTimer = setInterval(requestJevDecision, JEV_REQUEST_INTERVAL_MS);
-      requestJevDecision();
+      requestTimer = setInterval(requestModelDecision, MODEL_REQUEST_INTERVAL_MS);
+      requestModelDecision();
     } else {
       queuedAnswers.push({ action: result.action, sequence, epoch, target, latency });
-      consumeJevAnswers();
+      consumeModelAnswers();
     }
   } catch (error) {
     if (run !== generation || !['starting', 'running'].includes(gameState.phase)) return;
@@ -274,61 +245,6 @@ async function requestJevDecision() {
     if (run === generation) { pending.delete(sequence); renderUI(); }
   }
 }
-async function requestDecision() {
-  if (!['starting', 'running'].includes(gameState.phase)) return;
-  if (decisionInFlight || !streamReady) return;
-  const ai = gameState.ai;
-  const state = currentObservation();
-  const sequence = nextSequence++;
-  const run = generation;
-  const controller = new AbortController();
-  decisionInFlight = true;
-  pending.set(sequence, controller);
-  const startedAt = performance.now();
-  const timeout = setTimeout(() => controller.abort(), 35_000);
-  ui['jev-state'].textContent = JSON.stringify(state);
-  try {
-    const packet = await postDecision({ state, sequence }, controller.signal);
-    if (run !== generation || !['starting', 'running'].includes(gameState.phase)) return;
-    if (packet.status !== 200) throw new Error(packet.body?.error || 'Model request failed');
-    const result = packet.body;
-    if (!['flap', 'wait'].includes(result.action) || result.sequence !== sequence) throw new Error('Invalid model decision');
-    const latency = Math.round(performance.now() - startedAt);
-    ai.latency = latency;
-    ai.received += 1;
-    ai.error = null;
-    if (gameState.phase === 'starting') {
-      gameState.phase = 'running';
-      ui['start-overlay'].classList.add('hidden');
-    }
-    ai.lastAction = result.action;
-    ui['jev-action'].textContent = `${result.action.toUpperCase()} · applied`;
-    ui['jev-probabilities'].textContent = Number.isFinite(result.probabilities?.[result.action])
-      ? `Choice probability: ${Math.round(result.probabilities[result.action] * 100)}%` : 'Model judgment';
-    if (result.action === 'flap') applyFlap();
-    addHistory(sequence, result.action, latency, 'applied');
-    stepRemaining = DECISION_STEP_MS / 1000;
-    lastFrame = performance.now();
-  } catch (error) {
-    if (run !== generation || !['starting', 'running'].includes(gameState.phase)) return;
-    ai.errors += 1;
-    ai.error = error.message;
-    addHistory(sequence, 'error', Math.round(performance.now() - startedAt), 'no input');
-    if (gameState.phase === 'starting') {
-      gameState.phase = 'aierror';
-      ui['overlay-title'].textContent = 'CONNECTION ERROR';
-      ui['overlay-copy'].textContent = error.message;
-      report('runner-error', { error: error.message });
-    }
-  } finally {
-    clearTimeout(timeout);
-    if (run === generation) {
-      pending.delete(sequence);
-      decisionInFlight = false;
-      renderUI();
-    }
-  }
-}
 function applyFlap() {
   gameState.bird.velocity = FLAP_VELOCITY;
   gameState.bird.rotation = -0.35;
@@ -343,19 +259,15 @@ function startGame() {
     lastFrame = performance.now();
   } else {
     gameState.phase = 'starting';
-    if (CONTROLLER === 'jev') requestJevDecision();
-    else requestDecision();
+    requestModelDecision();
   }
 }
 function endGame(reason) {
   gameState.phase = 'gameover';
   for (const controller of pending.values()) controller.abort();
   pending.clear();
-  decisionInFlight = false;
-  clearTimeout(stepTimer);
   clearInterval(requestTimer);
   queuedAnswers = [];
-  stepRemaining = 0;
   ui['start-overlay'].classList.remove('hidden');
   ui['overlay-kicker'].textContent = MODEL_LABEL;
   ui['overlay-title'].textContent = `Run ended at ${gameState.score}`;
@@ -388,9 +300,7 @@ function renderUI() {
   ui['stat-time'].textContent = `${gameState.elapsed.toFixed(1)}s`;
   ui['stat-latency'].textContent = ai.latency === null ? '-' : `${ai.latency}ms`;
   ui['stat-decisions'].textContent = ai.received;
-  ui['decision-counts'].textContent = CONTROLLER === 'jev'
-    ? `${pending.size} in flight · ${ai.discarded} superseded · ${ai.skipped} skipped · ${ai.errors} errors`
-    : `${pending.size} in flight · ${ai.errors} errors`;
+  ui['decision-counts'].textContent = `${pending.size} in flight · ${ai.discarded} superseded · ${ai.skipped} skipped · ${ai.errors} errors`;
   const action = gameState.phase === 'running' ? (ai.lastAction?.toUpperCase() || 'READY')
     : gameState.phase === 'gameover' ? 'ENDED' : gameState.phase === 'starting' ? 'THINK' : gameState.phase === 'aierror' ? 'ERROR' : 'READY';
   ui['live-action'].textContent = gameState.flash > 0 ? 'FLAP' : action;
@@ -523,26 +433,15 @@ function draw() {
 }
 
 function loop(now) {
-  if (gameState.phase === 'running' && (CONTROLLER === 'jev' || gameState.mode === 'human')) {
+  if (gameState.phase === 'running') {
     accumulator += Math.min(0.05, Math.max(0, (now - lastFrame) / 1000))
-      * (CONTROLLER === 'jev' && gameState.mode === 'physics' ? JEV_GAME_SPEED : 1);
+      * (gameState.mode === 'physics' ? MODEL_GAME_SPEED : 1);
     while (accumulator >= 1 / 120 && gameState.phase === 'running') {
-      if (CONTROLLER === 'jev' && gameState.mode === 'physics') consumeJevAnswers();
+      if (gameState.mode === 'physics') consumeModelAnswers();
       update(1 / 120);
       accumulator -= 1 / 120;
     }
     lastFrame = now;
-  } else if (gameState.phase === 'running' && stepRemaining > 0) {
-    const delta = Math.min(stepRemaining, Math.max(0, (now - lastFrame) / 1000));
-    if (delta > 0) {
-      update(delta);
-      stepRemaining -= delta;
-      lastFrame = now;
-      if (stepRemaining <= 0.000001 && gameState.phase === 'running') {
-        stepRemaining = 0;
-        requestDecision();
-      }
-    }
   } else lastFrame = now;
   renderUI();
   draw();
