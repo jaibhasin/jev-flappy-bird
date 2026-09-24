@@ -8,9 +8,13 @@ if (runner === 'jev' || runner === 'openai') {
   singleRun.hidden = false;
   await import('./game.js');
   if (window.parent !== window) {
-    new ResizeObserver(() => window.parent.postMessage({
-      type: 'runner-size', runner, height: Math.ceil(singleRun.getBoundingClientRect().height),
-    }, location.origin)).observe(singleRun);
+    let lastHeight = 0;
+    new ResizeObserver(() => {
+      const height = Math.ceil(singleRun.getBoundingClientRect().height);
+      if (height === lastHeight) return;
+      lastHeight = height;
+      window.parent.postMessage({ type: 'runner-size', runner, height }, location.origin);
+    }).observe(singleRun);
   }
 } else {
   document.body.classList.add('comparison-mode');
@@ -23,7 +27,7 @@ if (runner === 'jev' || runner === 'openai') {
       <div><p class="eyebrow">TWO MODELS. ONE COURSE.</p><h1>Who flies <em>further?</em></h1><p class="intro">Jev vs GPT-6 Luna. Same pipes. Same physics. One decision at a time.</p></div>
       <div class="match-controls"><button class="primary-button" id="start-both" disabled>Connecting…</button><span id="match-status" role="status">Getting both pilots ready</span></div>
     </section>
-    <div class="match-strip"><span><i class="live-dot"></i> <span id="match-label">READY WHEN YOU ARE</span></span><span><span id="course-label">FRESH SHARED COURSE</span> <b>·</b> INDEPENDENT TAKEOFF</span></div>
+    <div class="match-strip"><span><i class="live-dot"></i> <span id="match-label">READY WHEN YOU ARE</span></span><span><span id="course-label">FRESH SHARED COURSE</span> <b>·</b> SHARED TAKEOFF</span></div>
     <div class="comparison-grid">
       <section class="comparison-lane jev-lane"><header class="lane-header"><div class="model-identity"><span class="model-icon">J</span><div><h2>Jev</h2><span>TypeSafe AI</span></div></div><span class="lane-tag">PLAYER 01</span></header><iframe title="Jev controlled Flappy Bird" src="?runner=jev"></iframe></section>
       <span class="versus" aria-hidden="true">VS</span>
@@ -33,12 +37,13 @@ if (runner === 'jev' || runner === 'openai') {
 
   const frames = [...comparison.querySelectorAll('iframe')];
   const ready = new Set();
+  const armed = new Set();
   const results = new Map();
   const startBoth = comparison.querySelector('#start-both');
   const status = comparison.querySelector('#match-status');
   const label = comparison.querySelector('#match-label');
   let matchId = null;
-  let countdown;
+  let launched = false;
   const send = (message) => frames.forEach((frame) => frame.contentWindow.postMessage(message, location.origin));
   window.addEventListener('message', (event) => {
     const index = frames.findIndex((frame) => frame.contentWindow === event.source);
@@ -46,7 +51,8 @@ if (runner === 'jev' || runner === 'openai') {
     const data = event.data;
     if (data?.runner !== (index === 0 ? 'jev' : 'openai')) return;
     if (data.type === 'runner-size' && Number.isFinite(data.height)) {
-      frames[index].style.height = `${Math.max(300, Math.min(1800, data.height))}px`;
+      const height = `${Math.max(300, Math.min(1800, data.height))}px`;
+      if (frames[index].style.height !== height) frames[index].style.height = height;
     }
     if (data.type === 'runner-ready') {
       ready.add(data.runner);
@@ -57,6 +63,17 @@ if (runner === 'jev' || runner === 'openai') {
       }
     }
     if (!matchId || data.matchId !== matchId) return;
+    if (data.type === 'runner-armed' && !launched) {
+      armed.add(data.runner);
+      status.textContent = `${armed.size}/2 first decisions ready`;
+      if (armed.size === 2) {
+        launched = true;
+        const launchAt = Date.now() + 500;
+        label.textContent = 'TAKEOFF TOGETHER';
+        status.textContent = 'Both birds will run at the same speed';
+        send({ type: 'comparison-launch', matchId, launchAt });
+      }
+    }
     if (data.type === 'runner-error') {
       status.textContent = `${index === 0 ? 'Jev' : 'Luna'}: ${data.error}`;
       startBoth.textContent = 'Restart matchup ↗';
@@ -64,7 +81,6 @@ if (runner === 'jev' || runner === 'openai') {
     if (data.type === 'runner-state' && data.phase === 'gameover') {
       results.set(data.runner, data.score);
       if (results.size === 2) {
-        clearInterval(countdown);
         const jev = results.get('jev');
         const luna = results.get('openai');
         label.textContent = jev === luna ? 'MATCH COMPLETE / TIE' : `MATCH COMPLETE / ${jev > luna ? 'JEV' : 'LUNA'} WINS`;
@@ -73,13 +89,14 @@ if (runner === 'jev' || runner === 'openai') {
     }
   });
   startBoth.addEventListener('click', () => {
-    clearInterval(countdown);
     const seed = crypto.getRandomValues(new Uint32Array(1))[0];
     comparison.querySelector('#course-label').textContent = `COURSE ${seed.toString(16).toUpperCase().padStart(8, '0')}`;
     matchId = crypto.randomUUID();
+    launched = false;
+    armed.clear();
     results.clear();
-    label.textContent = 'MATCH IN PROGRESS';
-    status.textContent = 'Each bird starts when its model responds';
+    label.textContent = 'PREPARING BOTH MODELS';
+    status.textContent = 'Waiting for both first decisions before takeoff';
     startBoth.textContent = 'Restart matchup ↗';
     send({ type: 'comparison-prepare', matchId, seed });
   });

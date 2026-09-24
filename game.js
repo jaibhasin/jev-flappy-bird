@@ -29,6 +29,7 @@ const ui = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)])
 let gameState;
 let matchId = null;
 let generation = 0;
+let scheduledLaunch = null;
 let lastFrame = performance.now();
 let accumulator = 0;
 let requestTimer;
@@ -99,11 +100,12 @@ function resetGame(mode = 'physics', seed = randomSeed()) {
   queuedAnswers = [];
   accumulator = 0;
   leadEstimate = 280;
+  scheduledLaunch = null;
   nextSequence = 0;
   recent = [];
   gameState = { mode, seed, phase: 'ready', score: 0, elapsed: 0, flash: 0,
     bird: { y: HEIGHT * 0.45, velocity: 0, rotation: 0 }, pipes: createPipes(seed),
-    ai: { epoch: 0, appliedSequence: -1, discarded: 0, skipped: 0,
+    ai: { epoch: 0, appliedSequence: -1, firstAction: null, discarded: 0, skipped: 0,
       latency: null, received: 0, errors: 0, error: null,
       lastAction: null, flapsApplied: 0 } };
   ui['start-overlay'].classList.remove('hidden');
@@ -196,7 +198,7 @@ async function requestModelDecision() {
   const state = modelObservation(leadMs);
   const controller = new AbortController();
   pending.set(sequence, controller);
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout = setTimeout(() => controller.abort(), gameState.phase === 'starting' ? 30_000 : 8000);
   const startedAt = performance.now();
   ui['jev-state'].textContent = JSON.stringify(state);
   try {
@@ -215,16 +217,14 @@ async function requestModelDecision() {
     ui['jev-probabilities'].textContent = Number.isFinite(probability)
       ? `Choice probability: ${Math.round(probability * 100)}%` : 'Model judgment';
     if (gameState.phase === 'starting') {
-      gameState.phase = 'running';
-      ai.lastAction = result.action;
-      ai.appliedSequence = sequence;
-      if (result.action === 'flap') { applyFlap(); ai.epoch += 1; }
-      ui['start-overlay'].classList.add('hidden');
-      ui['jev-action'].textContent = `${result.action.toUpperCase()} · applied`;
-      addHistory(sequence, result.action, latency, 'applied');
-      lastFrame = performance.now();
-      requestTimer = setInterval(requestModelDecision, MODEL_REQUEST_INTERVAL_MS);
-      requestModelDecision();
+      ai.firstAction = { action: result.action, sequence, latency };
+      if (EMBEDDED) {
+        gameState.phase = 'armed';
+        ui['overlay-kicker'].textContent = 'First decision ready';
+        ui['overlay-title'].textContent = 'READY TO FLY';
+        ui['overlay-copy'].textContent = 'Both birds will take off together.';
+        report('runner-armed');
+      } else launchGame(performance.now());
     } else {
       queuedAnswers.push({ action: result.action, sequence, epoch, target, latency });
       consumeModelAnswers();
@@ -244,6 +244,21 @@ async function requestModelDecision() {
     clearTimeout(timeout);
     if (run === generation) { pending.delete(sequence); renderUI(); }
   }
+}
+function launchGame(now, elapsedSinceLaunch = 0) {
+  if (gameState.phase !== 'starting' && gameState.phase !== 'armed') return;
+  const first = gameState.ai.firstAction;
+  if (!first) return;
+  gameState.phase = 'running';
+  gameState.ai.lastAction = first.action;
+  gameState.ai.appliedSequence = first.sequence;
+  if (first.action === 'flap') { applyFlap(); gameState.ai.epoch += 1; }
+  ui['start-overlay'].classList.add('hidden');
+  ui['jev-action'].textContent = `${first.action.toUpperCase()} · applied`;
+  addHistory(first.sequence, first.action, first.latency, 'applied');
+  lastFrame = now - elapsedSinceLaunch;
+  requestTimer = setInterval(requestModelDecision, MODEL_REQUEST_INTERVAL_MS);
+  requestModelDecision();
 }
 function applyFlap() {
   gameState.bird.velocity = FLAP_VELOCITY;
@@ -293,26 +308,31 @@ function update(delta) {
     endGame(bird.y < pipe.gapTop ? 'upper pipe' : 'lower pipe');
   } else if (gameState.score === gameState.pipes.length) endGame('complete');
 }
+function setText(element, value) {
+  const next = String(value);
+  if (element.textContent !== next) element.textContent = next;
+}
 function renderUI() {
   const ai = gameState.ai;
-  ui.score.textContent = gameState.score;
-  ui['stat-score'].textContent = String(gameState.score).padStart(2, '0');
-  ui['stat-time'].textContent = `${gameState.elapsed.toFixed(1)}s`;
-  ui['stat-latency'].textContent = ai.latency === null ? '-' : `${ai.latency}ms`;
-  ui['stat-decisions'].textContent = ai.received;
-  ui['decision-counts'].textContent = `${pending.size} in flight · ${ai.discarded} superseded · ${ai.skipped} skipped · ${ai.errors} errors`;
+  setText(ui.score, gameState.score);
+  setText(ui['stat-score'], String(gameState.score).padStart(2, '0'));
+  setText(ui['stat-time'], `${gameState.elapsed.toFixed(1)}s`);
+  setText(ui['stat-latency'], ai.latency === null ? '-' : `${ai.latency}ms`);
+  setText(ui['stat-decisions'], ai.received);
+  setText(ui['decision-counts'], `${pending.size} in flight · ${ai.discarded} superseded · ${ai.skipped} skipped · ${ai.errors} errors`);
   const action = gameState.phase === 'running' ? (ai.lastAction?.toUpperCase() || 'READY')
     : gameState.phase === 'gameover' ? 'ENDED' : gameState.phase === 'starting' ? 'THINK' : gameState.phase === 'aierror' ? 'ERROR' : 'READY';
-  ui['live-action'].textContent = gameState.flash > 0 ? 'FLAP' : action;
-  ui['action-fill'].style.width = (gameState.flash > 0 || action === 'FLAP') ? '100%' : '8%';
-  ui['run-status'].textContent = gameState.phase === 'running' ? ai.error ? 'API error' : 'Playing'
-    : gameState.phase === 'gameover' ? 'Game over' : gameState.phase === 'starting' ? 'Connecting' : 'Ready';
+  setText(ui['live-action'], gameState.flash > 0 ? 'FLAP' : action);
+  const fillWidth = (gameState.flash > 0 || action === 'FLAP') ? '100%' : '8%';
+  if (ui['action-fill'].style.width !== fillWidth) ui['action-fill'].style.width = fillWidth;
+  setText(ui['run-status'], gameState.phase === 'running' ? ai.error ? 'API error' : 'Playing'
+    : gameState.phase === 'gameover' ? 'Game over' : gameState.phase === 'starting' ? 'Connecting' : 'Ready');
   if (gameState.phase === 'starting' && gameState.elapsed === 0) {
-    ui['overlay-kicker'].textContent = 'Waiting for first decision';
-    ui['overlay-title'].textContent = 'THINKING…';
-    ui['overlay-copy'].textContent = 'The game begins when the model responds.';
+    setText(ui['overlay-kicker'], 'Waiting for first decision');
+    setText(ui['overlay-title'], 'THINKING…');
+    setText(ui['overlay-copy'], 'The game begins when the model responds.');
   }
-  if (ai.error) ui['jev-state'].textContent = ai.error;
+  if (ai.error) setText(ui['jev-state'], ai.error);
 }
 function drawBackground() {
   const sky = ctx.createLinearGradient(0, 0, 0, HEIGHT);
@@ -417,7 +437,9 @@ function drawBird(y = gameState.bird.y, rotation = gameState.bird.rotation) {
 function draw() {
   drawBackground();
   if (gameState.phase !== 'ready') {
-    for (const pipe of gameState.pipes) drawPipe(pipe);
+    for (const pipe of gameState.pipes) {
+      if (pipe.x < WIDTH + 5 && pipe.x + PIPE_WIDTH > -5) drawPipe(pipe);
+    }
   }
   drawGround();
   if (gameState.phase === 'ready') {
@@ -432,7 +454,11 @@ function draw() {
   }
 }
 
-function loop(now) {
+function tick(now) {
+  if (gameState.phase === 'armed' && scheduledLaunch !== null && Date.now() >= scheduledLaunch) {
+    launchGame(now, Date.now() - scheduledLaunch);
+    scheduledLaunch = null;
+  }
   if (gameState.phase === 'running') {
     accumulator += Math.max(0, (now - lastFrame) / 1000)
       * (gameState.mode === 'physics' ? MODEL_GAME_SPEED : 1);
@@ -445,6 +471,9 @@ function loop(now) {
   } else lastFrame = now;
   renderUI();
   draw();
+}
+function loop(now) {
+  tick(now);
   requestAnimationFrame(loop);
 }
 window.addEventListener('message', (event) => {
@@ -456,6 +485,8 @@ window.addEventListener('message', (event) => {
     startGame();
   }
   if (data?.matchId !== matchId) return;
+  if (data.type === 'comparison-launch' && gameState.phase === 'armed'
+      && Number.isFinite(data.launchAt)) scheduledLaunch = data.launchAt;
 });
 ui['start-button'].addEventListener('click', () => {
   if (EMBEDDED) return;
@@ -475,4 +506,8 @@ window.addEventListener('keydown', (event) => {
 });
 resetGame(RUNNER ? 'physics' : 'human');
 requestAnimationFrame(loop);
+setInterval(() => {
+  const now = performance.now();
+  if (now - lastFrame >= 50) tick(now);
+}, 50);
 report('runner-ready');

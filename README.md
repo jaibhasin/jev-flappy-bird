@@ -38,7 +38,8 @@ Response times, the latest action, in-flight status, and errors remain visible.
 
 Each matchup generates a new random seed and sends it to both games.
 The visible course ID identifies that seed.
-Both models see identical observations initially, then each sees its own bird state as their choices diverge.
+Both models prepare their first decision before the birds take off together.
+They see identical observations initially, then each sees its own bird state as their choices diverge.
 The live panels show actual responses, round-trip response times, application status, and error counts.
 Identical choices are possible; no artificial variation is added to model actions.
 
