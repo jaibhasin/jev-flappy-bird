@@ -22,6 +22,7 @@ const ACTION_CHOICES = {
   flap: 'Flap: the bird is below the gap, or is in the lower half of the gap and not rising.',
   wait: 'Wait: the bird is above the gap (even when falling fast), or is in the upper half of the gap, or is rising inside the gap.',
 };
+const LUNA_CONFIDENCE_INSTRUCTIONS = 'Also estimate confidence for both actions as probabilities from 0 to 1 that sum to 1. The chosen action must have the higher probability.';
 const streams = new Map();
 function openStream(response, client) {
   if (typeof client !== 'string' || !client || client.length > 128) { sendError(response, 400, 'Invalid client.'); return; }
@@ -203,20 +204,26 @@ async function handleAction(request, response, controller, suppliedInput) {
         body: JSON.stringify({
           model: OPENAI_MODEL, reasoning_effort: 'none', max_completion_tokens: 400,
           messages: [
-            { role: 'system', content: JSON.stringify({ instructions: ACTION_QUESTION, criteria: ACTION_CHOICES }) },
+            { role: 'system', content: JSON.stringify({ instructions: ACTION_QUESTION,
+              criteria: ACTION_CHOICES, confidence: LUNA_CONFIDENCE_INSTRUCTIONS }) },
             { role: 'user', content: JSON.stringify({ state: input.state }) },
           ],
           response_format: { type: 'json_schema', json_schema: {
             name: 'flappy_bird_action', strict: true,
-            schema: { type: 'object', properties: { action: { type: 'string', enum: ['flap', 'wait'] } },
-              required: ['action'], additionalProperties: false },
+            schema: { type: 'object', properties: {
+              action: { type: 'string', enum: ['flap', 'wait'] },
+              flap_probability: { type: 'number' },
+              wait_probability: { type: 'number' },
+            }, required: ['action', 'flap_probability', 'wait_probability'], additionalProperties: false },
           } },
         }),
       });
       if (!upstream.ok) throw new Error(`OpenAI request failed (HTTP ${upstream.status}).`);
       const payload = await upstream.json();
       const answer = JSON.parse(payload.choices?.[0]?.message?.content || '{}');
-      result = { action: answer.action, confidence: null, probabilities: {}, model: payload.model, usage: payload.usage };
+      result = { action: answer.action, confidence: null,
+        probabilities: { flap: answer.flap_probability, wait: answer.wait_probability },
+        model: payload.model, usage: payload.usage };
     }
     if (!['flap', 'wait'].includes(result.action)) throw new Error('Model returned an invalid action.');
     result.sequence = input.sequence;

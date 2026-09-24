@@ -42,33 +42,28 @@
         <aside class="jev-panel" aria-label="Model request and response">
           <div class="telemetry-heading"><i class="live-dot"></i><span>LIVE TELEMETRY</span></div>
           <section class="action-block">
-            <h2>Last applied choice</h2>
-            <p class="live-action" id="live-action">READY</p>
-            <div class="action-track"><span id="action-fill"></span></div>
-            <div class="action-labels"><span>WAIT</span><span>FLAP</span></div>
+            <div class="telemetry-choice"><span>Last applied</span><strong class="live-action" id="live-action">READY</strong></div>
+            <h2>Choice confidence</h2>
+            <div class="confidence-list" aria-label="Latest model confidence by action">
+              <div class="confidence-row"><span>WAIT</span><div class="confidence-track" role="progressbar" aria-label="Wait confidence" aria-valuemin="0" aria-valuemax="100"><span id="wait-confidence-fill"></span></div><strong id="wait-confidence">-</strong></div>
+              <div class="confidence-row"><span>FLAP</span><div class="confidence-track" role="progressbar" aria-label="Flap confidence" aria-valuemin="0" aria-valuemax="100"><span id="flap-confidence-fill"></span></div><strong id="flap-confidence">-</strong></div>
+            </div>
+            <div class="telemetry-meta">
+              <div><span>Latency</span><strong id="stat-latency">-</strong></div>
+              <div><span>Decisions</span><strong id="stat-decisions">0</strong></div>
+            </div>
+            <p id="decision-counts">0 in flight · 0 superseded · 0 skipped · 0 errors</p>
           </section>
-          <div class="stats-grid">
-            <div><span>Score</span><strong id="stat-score">00</strong></div>
-            <div><span>Flight time</span><strong id="stat-time">0.0<span>s</span></strong></div>
-            <div><span>Last response</span><strong id="stat-latency">-</strong></div>
-            <div><span>Decisions received</span><strong id="stat-decisions">0</strong></div>
-          </div>
-          <section class="decision-block response-block">
-            <h2 id="response-heading">Latest response</h2>
+          <details class="recent-decisions">
+            <summary>Recent decisions</summary>
             <p class="decision-action" id="jev-action">Awaiting takeoff</p>
-            <div class="probabilities" id="jev-probabilities">No response yet</div>
-          </section>
-          <section class="recent-decisions" aria-label="Recent model decisions">
-            <h2>Recent decisions</h2>
             <ol id="decision-history"></ol>
-            <p id="decision-counts">0 discarded · 0 skipped · 0 errors</p>
-          </section>
+          </details>
           <details class="request-details"><summary id="sent-heading">Model input</summary>
             <p class="decision-question" id="jev-question">Should the bird FLAP now or WAIT?</p>
             <p class="decision-state" id="jev-state">Waiting for a model request</p>
             <p class="decision-state" id="jev-choices">One action per decision.</p>
           </details>
-          <div class="panel-footnote">DIRECT MODEL CONTROL</div>
         </aside>
       </section>
       </section>

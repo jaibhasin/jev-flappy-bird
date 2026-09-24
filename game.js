@@ -22,8 +22,9 @@ const MODEL_REQUEST_INTERVAL_MS = 50;
 const MODEL_MAX_IN_FLIGHT = 12;
 const clientId = crypto.randomUUID();
 const ids = ['score', 'run-status', 'start-overlay', 'overlay-kicker', 'overlay-title', 'overlay-copy',
-  'start-button', 'human-mode', 'physics-mode', 'control-hint', 'live-action', 'action-fill',
-  'stat-score', 'stat-time', 'stat-latency', 'stat-decisions', 'jev-action', 'jev-probabilities',
+  'start-button', 'human-mode', 'physics-mode', 'control-hint', 'live-action',
+  'wait-confidence', 'wait-confidence-fill', 'flap-confidence', 'flap-confidence-fill',
+  'stat-latency', 'stat-decisions', 'jev-action',
   'jev-question', 'jev-state', 'jev-choices', 'decision-history', 'decision-counts'];
 const ui = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 let gameState;
@@ -114,7 +115,7 @@ function resetGame(mode = 'physics', seed = randomSeed()) {
   ui['overlay-copy'].textContent = EMBEDDED ? 'Start the matchup above.' : 'Ready for takeoff.';
   ui['start-button'].textContent = 'Start run';
   ui['jev-action'].textContent = 'Awaiting decision';
-  ui['jev-probabilities'].textContent = 'No response yet';
+  setConfidence(null);
   ui['jev-question'].textContent = 'Should the bird FLAP now or WAIT?';
   ui['jev-state'].textContent = 'Waiting for observation';
   ui['jev-choices'].textContent = 'One action per decision.';
@@ -161,6 +162,25 @@ function addHistory(sequence, action, latency, disposition) {
     }
     return row;
   }));
+}
+function setConfidence(probabilities) {
+  const entries = [
+    ['wait', ui['wait-confidence'], ui['wait-confidence-fill']],
+    ['flap', ui['flap-confidence'], ui['flap-confidence-fill']],
+  ];
+  const values = entries.map(([key]) => {
+    const value = probabilities?.[key];
+    return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : null;
+  });
+  const total = values.every(Number.isFinite) ? values[0] + values[1] : 0;
+  entries.forEach(([key, label, fill], index) => {
+    const percent = total > 0 ? Math.round(values[index] / total * 100) : null;
+    setText(label, percent === null ? '-' : `${percent}%`);
+    const width = percent === null ? '0%' : `${percent}%`;
+    if (fill.style.width !== width) fill.style.width = width;
+    if (percent === null) fill.parentElement.removeAttribute('aria-valuenow');
+    else fill.parentElement.setAttribute('aria-valuenow', String(percent));
+  });
 }
 function consumeModelAnswers() {
   const due = queuedAnswers.filter((answer) => answer.target <= gameState.elapsed * 1000 + 0.001);
@@ -213,9 +233,7 @@ async function requestModelDecision() {
     ai.latency = latency;
     ai.received += 1;
     ai.error = null;
-    const probability = result.probabilities?.[result.action];
-    ui['jev-probabilities'].textContent = Number.isFinite(probability)
-      ? `Choice probability: ${Math.round(probability * 100)}%` : 'Model judgment';
+    setConfidence(result.probabilities);
     if (gameState.phase === 'starting') {
       ai.firstAction = { action: result.action, sequence, latency };
       if (EMBEDDED) {
@@ -315,16 +333,12 @@ function setText(element, value) {
 function renderUI() {
   const ai = gameState.ai;
   setText(ui.score, gameState.score);
-  setText(ui['stat-score'], String(gameState.score).padStart(2, '0'));
-  setText(ui['stat-time'], `${gameState.elapsed.toFixed(1)}s`);
   setText(ui['stat-latency'], ai.latency === null ? '-' : `${ai.latency}ms`);
   setText(ui['stat-decisions'], ai.received);
   setText(ui['decision-counts'], `${pending.size} in flight · ${ai.discarded} superseded · ${ai.skipped} skipped · ${ai.errors} errors`);
   const action = gameState.phase === 'running' ? (ai.lastAction?.toUpperCase() || 'READY')
     : gameState.phase === 'gameover' ? 'ENDED' : gameState.phase === 'starting' ? 'THINK' : gameState.phase === 'aierror' ? 'ERROR' : 'READY';
   setText(ui['live-action'], gameState.flash > 0 ? 'FLAP' : action);
-  const fillWidth = (gameState.flash > 0 || action === 'FLAP') ? '100%' : '8%';
-  if (ui['action-fill'].style.width !== fillWidth) ui['action-fill'].style.width = fillWidth;
   setText(ui['run-status'], gameState.phase === 'running' ? ai.error ? 'API error' : 'Playing'
     : gameState.phase === 'gameover' ? 'Game over' : gameState.phase === 'starting' ? 'Connecting' : 'Ready');
   if (gameState.phase === 'starting' && gameState.elapsed === 0) {
