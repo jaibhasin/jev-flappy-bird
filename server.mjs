@@ -17,6 +17,7 @@ const WARM_AFTER_IDLE_MS = WARM_EVERY_MS / 2;
 const JEV_LOG_LIMIT = 50;
 const JEV_LOG_PATH = `${ROOT}jev-logs.jsonl`;
 const LUNA_LOG_PATH = `${ROOT}luna-logs.jsonl`;
+const DIAGNOSTICS_LOG_PATH = `${ROOT}diagnostics.jsonl`;
 const ACTION_QUESTION = 'What should the bird do right now to pass safely through the gap of the next pipe?';
 const ACTION_CHOICES = {
   flap: 'Flap: the bird is below the gap, or is in the lower half of the gap and not rising.',
@@ -116,6 +117,10 @@ function readLunaLogs() {
 
 function saveLunaLog(entry) {
   appendFileSync(LUNA_LOG_PATH, `${JSON.stringify(entry)}\n`);
+}
+
+function saveDiagnostic(entry) {
+  appendFileSync(DIAGNOSTICS_LOG_PATH, `${JSON.stringify(entry)}\n`);
 }
 
 async function readJson(request) {
@@ -314,6 +319,14 @@ const server = createServer(async (request, response) => {
       typesafeConfigured: Boolean(process.env.TYPESAFE_API_KEY || process.env.JEV_API_KEY),
       openaiConfigured: Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'your_openai_api_key'),
     });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/diagnostics') {
+    try {
+      saveDiagnostic(await readJson(request));
+      sendJson(response, 202, { ok: true });
+    } catch { sendError(response, 400, 'Invalid diagnostic payload.'); }
     return;
   }
 

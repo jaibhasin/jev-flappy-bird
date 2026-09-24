@@ -51,6 +51,10 @@ Read the records at <http://localhost:4173/api/openai/logs> or inspect the JSONL
 Clear the Luna log with `DELETE /api/openai/logs`.
 The log stays local and is ignored by Git.
 
+Browser-measured diagnostics are appended to `diagnostics.jsonl` through `POST /api/diagnostics`.
+The browser writes a `run-start` record (run ID, model, course seed, smoothing factors), an `answer` record for each decision (sequence, prediction lead, client latency, queue wait, and whether it was applied, superseded, or cancelled), and a `game-over` record (game time, score, collision reason).
+This file is append-only, is not capped like the Jev request log, and is ignored by Git.
+
 ## Game physics
 
 - Canvas: `540 x 720` pixels.

@@ -20,6 +20,8 @@ const FLAP_VELOCITY = -330;
 const MODEL_GAME_SPEED = 0.3;
 const MODEL_REQUEST_INTERVAL_MS = 50;
 const MODEL_MAX_IN_FLIGHT = 12;
+const LEAD_SMOOTH_DOWN = 0.4;
+const LEAD_SMOOTH_UP = 0.08;
 const clientId = crypto.randomUUID();
 const ids = ['score', 'run-status', 'start-overlay', 'overlay-kicker', 'overlay-title', 'overlay-copy',
   'start-button', 'human-mode', 'physics-mode', 'control-hint', 'live-action',
@@ -30,6 +32,7 @@ const ui = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)])
 let gameState;
 let matchId = null;
 let generation = 0;
+let runId = null;
 let scheduledLaunch = null;
 let lastFrame = performance.now();
 let accumulator = 0;
@@ -75,6 +78,14 @@ let recent = [];
 function report(type, extra = {}) {
   if (EMBEDDED) window.parent.postMessage({ type, runner: RUNNER, matchId, ...extra }, location.origin);
 }
+function logDiagnostic(type, extra = {}) {
+  try {
+    fetch('/api/diagnostics', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+      body: JSON.stringify({ type, runId, client: clientId, matchId, at: Date.now(), ...extra }),
+    }).catch(() => {});
+  } catch {}
+}
 function randomSeed() { return crypto.getRandomValues(new Uint32Array(1))[0]; }
 function seededRandom(seed) {
   let value = seed >>> 0;
@@ -95,6 +106,7 @@ function createPipes(seed) {
 }
 function resetGame(mode = 'physics', seed = randomSeed()) {
   generation += 1;
+  runId = crypto.randomUUID();
   for (const controller of pending.values()) controller.abort();
   pending.clear();
   clearInterval(requestTimer);
@@ -139,6 +151,8 @@ function modelObservation(leadMs) {
   const round = Math.round;
   return {
     observed_game_ms: round(gameState.elapsed * 1000), prediction_lead_ms: leadMs,
+    game_speed: MODEL_GAME_SPEED,
+    timing: 'Positions and velocity are already projected to the expected action time. prediction_lead_ms is real time; observed_game_ms is game time. Velocity is pixels per game second. Do not project again.',
     bird_y: round(y), bird_velocity: round(velocity),
     pipe_distance: pipe ? round(pipe.x - shift - BIRD_X) : null,
     gap_top: pipe ? round(pipe.gapTop) : null, gap_bottom: pipe ? round(pipe.gapBottom) : null,
@@ -200,6 +214,11 @@ function consumeModelAnswers() {
       }
     }
     const disposition = stale ? 'superseded' : 'applied';
+    const queueWaitMs = Math.round(performance.now() - answer.queuedAt);
+    console.debug('[decision]', { sequence: answer.sequence, lead_ms: answer.lead,
+      latency_ms: answer.latency, queued_ms: queueWaitMs, disposition });
+    logDiagnostic('answer', { sequence: answer.sequence, predictionLeadMs: answer.lead,
+      clientLatencyMs: answer.latency, queueWaitMs, disposition });
     ui['jev-action'].textContent = `${answer.action.toUpperCase()} · ${disposition}`;
     addHistory(answer.sequence, answer.action, answer.latency, disposition);
   }
@@ -229,7 +248,7 @@ async function requestModelDecision() {
     if (!['flap', 'wait'].includes(result.action) || result.sequence !== sequence) throw new Error('Invalid model decision');
     const ai = gameState.ai;
     const latency = Math.round(performance.now() - startedAt);
-    leadEstimate += (Math.min(latency, 1000) - leadEstimate) * 0.2;
+    leadEstimate += (latency - leadEstimate) * (latency < leadEstimate ? LEAD_SMOOTH_DOWN : LEAD_SMOOTH_UP);
     ai.latency = latency;
     ai.received += 1;
     ai.error = null;
@@ -244,7 +263,7 @@ async function requestModelDecision() {
         report('runner-armed');
       } else launchGame(performance.now());
     } else {
-      queuedAnswers.push({ action: result.action, sequence, epoch, target, latency });
+      queuedAnswers.push({ action: result.action, sequence, epoch, target, latency, lead: leadMs, queuedAt: performance.now() });
       consumeModelAnswers();
     }
   } catch (error) {
@@ -274,6 +293,8 @@ function launchGame(now, elapsedSinceLaunch = 0) {
   ui['start-overlay'].classList.add('hidden');
   ui['jev-action'].textContent = `${first.action.toUpperCase()} · applied`;
   addHistory(first.sequence, first.action, first.latency, 'applied');
+  logDiagnostic('answer', { sequence: first.sequence, predictionLeadMs: 0,
+    clientLatencyMs: first.latency, queueWaitMs: 0, disposition: 'applied' });
   lastFrame = now - elapsedSinceLaunch;
   requestTimer = setInterval(requestModelDecision, MODEL_REQUEST_INTERVAL_MS);
   requestModelDecision();
@@ -292,15 +313,25 @@ function startGame() {
     lastFrame = performance.now();
   } else {
     gameState.phase = 'starting';
+    logDiagnostic('run-start', { controller: CONTROLLER, model: MODEL_LABEL, seed: gameState.seed,
+      leadSmoothDown: LEAD_SMOOTH_DOWN, leadSmoothUp: LEAD_SMOOTH_UP });
     requestModelDecision();
   }
 }
 function endGame(reason) {
   gameState.phase = 'gameover';
+  const endedAt = performance.now();
+  for (const answer of queuedAnswers) {
+    logDiagnostic('answer', { sequence: answer.sequence, predictionLeadMs: answer.lead,
+      clientLatencyMs: answer.latency, queueWaitMs: Math.round(endedAt - answer.queuedAt),
+      disposition: 'cancelled' });
+  }
   for (const controller of pending.values()) controller.abort();
   pending.clear();
   clearInterval(requestTimer);
   queuedAnswers = [];
+  logDiagnostic('game-over', { elapsedMs: Math.round(gameState.elapsed * 1000),
+    score: gameState.score, reason });
   ui['start-overlay'].classList.remove('hidden');
   ui['overlay-kicker'].textContent = MODEL_LABEL;
   ui['overlay-title'].textContent = `Run ended at ${gameState.score}`;
