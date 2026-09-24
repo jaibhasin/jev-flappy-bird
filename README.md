@@ -27,7 +27,7 @@ Each model receives a projected bird position and velocity, the next pipe, and i
 It returns one `flap` or `wait` action through TypeSafe or the OpenAI API.
 No candidate plans, scheduled actions, safety overrides, or fallback flaps are used.
 
-Both birds and their pipes run continuously at half real-time speed.
+Both birds and their pipes run continuously at 30% of real-time speed.
 The game asks each model every 50 ms and can have up to 12 decisions in flight per game.
 Each question describes the projected scene when its answer is expected to arrive.
 A `wait` leaves other pending answers valid, while a `flap` supersedes answers based on the old flight path.
