@@ -1,67 +1,56 @@
-# Flappy Bird model race 🐦
+# Flappy Arena 🐦 - two models, one course.
 
-Run two independent games side by side: Jev and GPT-6 Luna through the OpenAI API.
-Both games use a fresh shared course and identical physics.
-Each model gets the current state and chooses one immediate action: flap or wait.
+> Jev and GPT-6 Luna race through the same Flappy Bird course.
+> Every flap is a live model decision.
 
-## Run
+![Node.js 22.19+](https://img.shields.io/badge/Node.js-22.19%2B-339933?logo=nodedotjs&logoColor=white)
+![TypeSafe AI](https://img.shields.io/badge/TypeSafe_AI-Jev-2a9d8f)
+![OpenAI](https://img.shields.io/badge/OpenAI-GPT--6_Luna-7456c8?logo=openai&logoColor=white)
+![Two live pilots](https://img.shields.io/badge/pilots-2_live_models-24292f)
+
+![Jev and GPT-6 Luna playing Flappy Bird side by side](assets/flappy-arena.gif)
+
+Each run starts on a fresh, shared course.
+Both birds take off together, then live with their own decisions.
+The score, latest action, confidence, and response time stay visible while they fly.
+
+## Run it locally
+
+You need Node.js 22.19 or newer and API keys for [TypeSafe AI](https://typesafe.ai/) and [OpenAI](https://platform.openai.com/).
 
 ```bash
+git clone https://github.com/jaibhasin/jev-flappy-bird.git
+cd jev-flappy-bird
+npm install
 cp .env.example .env
 ```
 
-Add your TypeSafe and OpenAI API keys to `.env`, then run:
+Put your `TYPESAFE_API_KEY` and `OPENAI_API_KEY` in `.env`, then start the server:
 
 ```bash
 npm start
 ```
 
-Open <http://localhost:4173> and select **Start the matchup**.
+Open [localhost:4173](http://localhost:4173) and click **Start the matchup**.
+The keys stay on your local server.
 
-Each game runs in its own frame, so its score, state, and model requests are independent.
-The API keys stay on the server.
+## How the race works
 
-## How the models play
+1. A random seed gives both games the same pipe layout and physics.
+   The birds launch together after each model has made its first decision.
+2. Each model sees its own bird's projected position, velocity, and next pipe, then chooses `flap` or `wait`.
+   The projection accounts for expected response time.
+3. The games keep moving at 30% speed while requesting decisions every 50 ms.
+   Several requests can be in flight at once, and a flap supersedes pending answers based on the old flight path.
 
-Each model receives a projected bird position and velocity, the next pipe, and its gap clearances.
-It returns one `flap` or `wait` action through TypeSafe or the OpenAI API.
-No candidate plans, scheduled actions, safety overrides, or fallback flaps are used.
+If an answer is late or fails, the bird keeps moving under gravity.
+The browser shows which answers were applied, superseded, or skipped.
 
-Both birds and their pipes run continuously at 30% of real-time speed.
-The game asks each model every 50 ms and can have up to 12 decisions in flight per game.
-Each question describes the projected scene when its answer is expected to arrive.
-A `wait` leaves other pending answers valid, while a `flap` supersedes answers based on the old flight path.
-If a model stops answering, its bird keeps falling without a local rescue flap.
-The local server delivers answers over an event stream, and both upstream APIs use persistent HTTP/2-capable connections.
+## Inspect a run
 
-Response times, the latest action, in-flight status, and errors remain visible.
+The server writes Jev decisions to `jev-logs.jsonl` (latest 50) and GPT-6 Luna decisions to `luna-logs.jsonl`.
+Browser timing and game outcomes go to `diagnostics.jsonl`.
+These local files are ignored by Git.
+You can also read the model logs at [`/api/jev/logs`](http://localhost:4173/api/jev/logs) and [`/api/openai/logs`](http://localhost:4173/api/openai/logs).
 
-Each matchup generates a new random seed and sends it to both games.
-The visible course ID identifies that seed.
-Both models prepare their first decision before the birds take off together.
-They see identical observations initially, then each sees its own bird state as their choices diverge.
-The live panels show actual responses, round-trip response times, application status, and error counts.
-Identical choices are possible; no artificial variation is added to model actions.
-
-## Local decision logs
-
-The server appends GPT-6 Luna requests, responses, timing, and errors to `luna-logs.jsonl`.
-Each record includes the observed game time, prediction lead, request sequence, and number of in-flight requests.
-Read the records at <http://localhost:4173/api/openai/logs> or inspect the JSONL file directly.
-Clear the Luna log with `DELETE /api/openai/logs`.
-The log stays local and is ignored by Git.
-
-Browser-measured diagnostics are appended to `diagnostics.jsonl` through `POST /api/diagnostics`.
-The browser writes a `run-start` record (run ID, model, course seed, smoothing factors), an `answer` record for each decision (sequence, prediction lead, client latency, queue wait, and whether it was applied, superseded, or cancelled), and a `game-over` record (game time, score, collision reason).
-This file is append-only, is not capped like the Jev request log, and is ignored by Git.
-
-## Game physics
-
-- Canvas: `540 x 720` pixels.
-- Gravity: `950 px/s²`.
-- Flap velocity: `-330 px/s`.
-- Pipe speed: `178 px/s`.
-- Pipe gap: `178 px`.
-- Pipe pattern: deterministic from a fresh shared seed for each matchup.
-
-The two lanes use the same physics speed, fixed simulation step, and decision cadence.
+Run `npm run check` for the JavaScript syntax checks and game tests.
