@@ -33,8 +33,8 @@ for (const runner of ['jev', 'openai']) test(`${runner} keeps the same slow phys
   const selectors = [
     '#score', '#run-status', '#start-overlay', '#overlay-kicker', '#overlay-title',
     '#overlay-copy', '#start-button', '#human-mode', '#physics-mode', '#control-hint',
-    '#live-action', '#action-fill', '#stat-score', '#stat-time', '#stat-latency',
-    '#stat-decisions', '#jev-action', '#jev-probabilities', '#jev-question', '#jev-state',
+    '#live-action', '#wait-confidence', '#wait-confidence-fill', '#flap-confidence',
+    '#flap-confidence-fill', '#stat-latency', '#stat-decisions', '#jev-action', '#jev-question', '#jev-state',
     '#jev-choices', '#decision-history', '#decision-counts',
   ];
   const elements = new Map(selectors.map((selector) => [selector, createElement()]));
@@ -60,6 +60,7 @@ for (const runner of ['jev', 'openai']) test(`${runner} keeps the same slow phys
   globalThis.EventSource = class { constructor() { stream = this; } };
   globalThis.fetch = async (url, options) => {
     if (url === '/api/jev/logs') return { ok: true, json: async () => ({ logs: [] }) };
+    if (url === '/api/diagnostics') return { status: 202 };
     urls.push(url);
     requests.push(JSON.parse(options.body));
     return { status: 202 };
