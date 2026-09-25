@@ -6,7 +6,6 @@
 ![Node.js 22.19+](https://img.shields.io/badge/Node.js-22.19%2B-339933?logo=nodedotjs&logoColor=white)
 ![TypeSafe AI](https://img.shields.io/badge/TypeSafe_AI-Jev-2a9d8f)
 ![OpenAI](https://img.shields.io/badge/OpenAI-GPT--6_Luna-7456c8?logo=openai&logoColor=white)
-![Two live pilots](https://img.shields.io/badge/pilots-2_live_models-24292f)
 
 ![Jev and GPT-6 Luna playing Flappy Bird side by side](assets/flappy-arena.gif)
 
